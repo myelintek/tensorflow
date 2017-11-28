@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         git \
         golang \
+        graphviz \
         libcurl3-dev \
         libfreetype6-dev \
         libpng12-dev \
@@ -22,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         rsync \
         software-properties-common \
         unzip \
+        vim \
         zip \
         zlib1g-dev \
         openjdk-8-jdk \
