@@ -109,6 +109,8 @@ RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/lib
     rm -rf /root/.cache
 # Clean up pip wheel and Bazel cache when done.
 
+RUN echo "/usr/local/cuda-9.0/targets/x86_64-linux/lib/stubs/" >> /etc/ld.so.conf.d/cuda-9-0.conf
+
 WORKDIR /root
 
 RUN git clone https://github.com/tensorflow/models.git
