@@ -113,7 +113,8 @@ RUN echo "/usr/local/cuda-9.0/targets/x86_64-linux/lib/stubs/" >> /etc/ld.so.con
 
 WORKDIR /root
 
-RUN git clone https://github.com/tensorflow/models.git
+RUN git clone https://github.com/tensorflow/models.git && \
+    git clone https://github.com/tensorflow/benchmarks.git
 
 # TensorBoard
 EXPOSE 6006
