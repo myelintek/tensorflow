@@ -113,8 +113,9 @@ RUN echo "/usr/local/cuda-9.0/targets/x86_64-linux/lib/stubs/" >> /etc/ld.so.con
 
 WORKDIR /root
 
-RUN git clone https://github.com/tensorflow/models.git && \
-    git clone https://github.com/tensorflow/benchmarks.git
+RUN git clone https://github.com/myelintek/models.git && \
+    git clone https://github.com/myelintek/benchmarks.git && \
+    pip install -U git+https://github.com/myelintek/tensorpack.git
 
 # TensorBoard
 EXPOSE 6006
