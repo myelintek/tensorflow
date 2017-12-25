@@ -111,6 +111,17 @@ RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/lib
 
 RUN echo "/usr/local/cuda-9.0/targets/x86_64-linux/lib/stubs/" >> /etc/ld.so.conf.d/cuda-9-0.conf
 
+ENV PROTOBUF_VERSION="3.5.1"
+RUN wget -O /opt/protobuf-python-${PROTOBUF_VERSION}.tar.gz \
+    https://github.com/google/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-python-${PROTOBUF_VERSION}.tar.gz && \
+    tar -zxvf /opt/protobuf-python-${PROTOBUF_VERSION}.tar.gz -C /opt/ && \
+    cd /opt/protobuf-${PROTOBUF_VERSION} && \
+    ./configure && \
+    make -j"$(nproc)" && \
+    make check && \
+    make install && \
+    ldconfig
+
 WORKDIR /root
 
 RUN git clone https://github.com/myelintek/models.git && \
