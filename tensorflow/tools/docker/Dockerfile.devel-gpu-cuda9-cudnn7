@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libzmq3-dev \
         pkg-config \
         python-dev \
+        python-opencv \
         python-pip \
         rsync \
         software-properties-common \
@@ -126,7 +127,8 @@ WORKDIR /root
 
 RUN git clone https://github.com/myelintek/models.git && \
     git clone https://github.com/myelintek/benchmarks.git && \
-    pip install -U git+https://github.com/myelintek/tensorpack.git
+    git clone https://github.com/myelintek/tensorpack.git && \
+    pip install -e ./tensorpack/
 
 # TensorBoard
 EXPOSE 6006
