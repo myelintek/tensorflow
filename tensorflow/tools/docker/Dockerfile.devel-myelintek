@@ -1,6 +1,6 @@
 FROM nvidia/cuda:9.0-cudnn7-devel-ubuntu16.04
 
-LABEL maintainer="Gunhan Gulsoy <gunan@google.com>"
+LABEL maintainer="Simon Chuang <simon.s.chuang@gmail.com>"
 
 # It is possible to override these for releases.
 ARG TF_BRANCH=master
@@ -20,7 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
         python-dev \
         python-opencv \
-        python-pip \
         rsync \
         software-properties-common \
         unzip \
@@ -34,23 +33,42 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip --no-cache-dir install --upgrade \
-        pip setuptools
+RUN curl -O https://bootstrap.pypa.io/get-pip.py && \
+    python get-pip.py && \
+    rm get-pip.py
 
 RUN pip --no-cache-dir install \
+        Pillow \
+        h5py \
         ipykernel \
         jupyter \
         matplotlib \
         numpy \
+        pandas \
         scipy \
         sklearn \
-        pandas \
         wheel \
         && \
     python -m ipykernel.kernelspec
 
+# --- DO NOT EDIT OR DELETE BETWEEN THE LINES --- #
+# These lines will be edited automatically by parameterized_docker_build.sh. #
+# COPY _PIP_FILE_ /
+# RUN pip --no-cache-dir install /_PIP_FILE_
+# RUN rm -f /_PIP_FILE_
+
+# Install TensorFlow GPU version.
+RUN pip --no-cache-dir install \
+    http://storage.googleapis.com/tensorflow/linux/gpu/tensorflow_gpu-0.0.0-cp27-none-linux_x86_64.whl
+# --- ~ DO NOT EDIT OR DELETE BETWEEN THE LINES --- #
+
+# RUN ln -s /usr/bin/python3 /usr/bin/python#
+
 # Set up our notebook config.
 COPY tensorflow/tools/docker/jupyter_notebook_config.py /root/.jupyter/
+
+# Copy sample notebooks.
+COPY tensorflow/tools/docker/notebooks /root/notebooks
 
 # Jupyter has issues with being run directly:
 #   https://github.com/ipython/ipython/issues/7062
@@ -110,8 +128,13 @@ RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/lib
     rm -rf /root/.cache
 # Clean up pip wheel and Bazel cache when done.
 
+# For CUDA profiling, TensorFlow requires CUPTI.
+ENV LD_LIBRARY_PATH /usr/local/cuda/extras/CUPTI/lib64:$LD_LIBRARY_PATH
+
+## Myelintek
 RUN echo "/usr/local/cuda-9.0/targets/x86_64-linux/lib/stubs/" >> /etc/ld.so.conf.d/cuda-9-0.conf
 
+# Install protobuf for tensorpack
 ENV PROTOBUF_VERSION="3.5.1"
 RUN wget -O /opt/protobuf-python-${PROTOBUF_VERSION}.tar.gz \
     https://github.com/google/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-python-${PROTOBUF_VERSION}.tar.gz && \
@@ -130,7 +153,11 @@ RUN git clone https://github.com/myelintek/models.git && \
     git clone https://github.com/myelintek/tensorpack.git && \
     pip install -e ./tensorpack/
 
+## Myelintek END
+
 # TensorBoard
 EXPOSE 6006
 # IPython
 EXPOSE 8888
+
+CMD ["/run_jupyter.sh", "--allow-root", "--ip=0.0.0.0"]
