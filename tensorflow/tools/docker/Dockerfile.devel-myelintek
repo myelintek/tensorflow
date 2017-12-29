@@ -154,6 +154,15 @@ RUN git clone https://github.com/myelintek/models.git && \
     git clone https://github.com/myelintek/tensorpack.git && \
     pip install -e ./tensorpack/
 
+RUN mkdir -p /root/tensorpack_data/ilsvrc_metadata && \
+    mkdir -p /root/tensorpack_data/caffe && \
+    cd /root/tensorpack_data/caffe && \
+    wget https://github.com/BVLC/caffe/raw/master/src/caffe/proto/caffe.proto && \
+    protoc caffe.proto --python_out . && \
+    cd /root/tensorpack_data/ilsvrc_metadata && \
+    wget http://dl.caffe.berkeleyvision.org/caffe_ilsvrc12.tar.gz && \
+    tar zxvf caffe_ilsvrc12.tar.gz .
+
 ## Myelintek END
 
 # TensorBoard
