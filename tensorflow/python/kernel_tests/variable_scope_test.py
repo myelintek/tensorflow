@@ -117,7 +117,7 @@ class VariableScopeTest(test.TestCase):
         w = variable_scope.get_variable("w", [])
         self.assertEqual(w.dtype.base_dtype, dtypes.float16)
 
-  def testEagerVaribleStore(self):
+  def testEagerVariableStore(self):
     with context.eager_mode():
       store = variable_scope.EagerVariableStore()
       with store.as_default():
@@ -1004,6 +1004,18 @@ class VariableScopeTest(test.TestCase):
     v = variable_scope.get_variable("v", shape=[3, 4], dtype=dtypes.float32)
     # Ensure it is possible to do get_variable with a _ref dtype passed in.
     _ = variable_scope.get_variable("w", shape=[5, 6], dtype=v.dtype)
+
+  def testTwoGraphs(self):
+
+    def f():
+      g1 = ops.Graph()
+      g2 = ops.Graph()
+      with g1.as_default():
+        with g2.as_default():
+          with variable_scope.variable_scope("_"):
+            pass
+
+    self.assertRaisesRegexp(ValueError, "'_' is not a valid scope name", f)
 
 
 def axis0_into1_partitioner(shape=None, **unused_kwargs):
