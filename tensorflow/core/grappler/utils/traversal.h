@@ -16,6 +16,7 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_GRAPPLER_UTILS_TRAVERSAL_H_
 #define TENSORFLOW_CORE_GRAPPLER_UTILS_TRAVERSAL_H_
 
+#include <queue>
 #include <functional>
 #include "tensorflow/core/grappler/graph_view.h"
 
@@ -33,7 +34,37 @@ void ReverseDfs(const GraphView& graph_view, const std::vector<NodeDef*>& from,
                 const std::function<void(NodeDef*)>& post_order,
                 const std::function<void(NodeDef*, NodeDef*)>& on_back_edge);
 
+void ReverseBfs(const GraphView& graph_view, const std::vector<NodeDef*>& from,
+                const std::function<void(NodeDef*)>& pre_order,
+                const std::function<void(NodeDef*)>& post_order,
+                const std::function<void(NodeDef*, NodeDef*)>& on_back_edge);
+
+void ReverseDfsV2(const GraphView& graph_view, const std::vector<NodeDef*>& from,
+                const NodeDef* to,
+                const std::function<void(NodeDef*)>& pre_order,
+                const std::function<void(NodeDef*)>& post_order,
+                const std::function<void(NodeDef*, NodeDef*)>& on_back_edge);
+
+std::unordered_map<NodeDef*, NodeDef*> ReverseDfsV3(const GraphView& graph_view, const std::vector<NodeDef*>& from,
+                const NodeDef* to,
+                const std::function<void(NodeDef*)>& pre_order,
+                const std::function<void(NodeDef*)>& post_order,
+                const std::function<void(NodeDef*, NodeDef*)>& on_back_edge);
+
+void BfsV2(const GraphView& graph_view, const std::vector<NodeDef*>& from,
+                const NodeDef* to,
+                const std::function<void(NodeDef*)>& pre_order,
+                const std::function<void(NodeDef*)>& post_order,
+                const std::function<void(NodeDef*, NodeDef*)>& on_back_edge);
+
+void ReverseBfsV2(const GraphView& graph_view, const std::vector<NodeDef*>& from,
+                const NodeDef* to,
+                const std::function<void(NodeDef*)>& pre_order,
+                const std::function<void(NodeDef*)>& post_order,
+                const std::function<void(NodeDef*, NodeDef*)>& on_back_edge);
+
 }  // namespace grappler
 }  // namespace tensorflow
 
 #endif  // TENSORFLOW_CORE_GRAPPLER_UTILS_TRAVERSAL_H_
+

@@ -20,6 +20,7 @@ limitations under the License.
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <cmath>
 
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/node_def.pb.h"
@@ -59,6 +60,9 @@ std::unordered_set<string> GetCheapToRecomputeOps() {
       "RealDiv",  "Reciprocal", "Relu",           "Relu6",  "Reshape",
       "Rsqrt",    "Sigmoid",    "Sqrt",           "Square", "SquaredDifference",
       "Sub",      "Tile",       "Transpose"};
+      //Danny experiment for more recomputed source nodes
+      //"MatMul",   "Merge",  "Floor",  "Switch",
+      //"MaxPool",  "Conv2D",     "FusedBatchNorm"};
   return cheap_ops;
 }
 
@@ -97,6 +101,7 @@ std::unordered_set<const NodeDef*> FindCandidateRecomputeNodes(
       continue;
     }
     candidate_recompute_nodes.insert(&node);
+    VLOG(1) << "...[DEBUG] FindCandidateRecomputeNodes(), recompute_nodes:" << node.name();
   }
   return candidate_recompute_nodes;
 }
@@ -168,6 +173,8 @@ std::vector<RecomputedSubGraph> GetOpGroupsToRecompute(
     visited_nodes.insert(unpruned_recompute_nodes.begin(),
                          unpruned_recompute_nodes.end());
     for (const NodeDef* recompute_node : unpruned_recompute_nodes) {
+      VLOG(1) << "...[DEBUG] in GetOpGroupsToRecompute(), unpruned_recompute_node=" << recompute_node->name();
+
       bool inserted_feed = false;
       for (NodeDef* output : node_map.GetOutputs(recompute_node->name())) {
         if (is_target(*output)) {
@@ -363,7 +370,7 @@ string RecomputedOrOriginalNodeName(
   }
 }
 
-// Helper function to recompute a sub-graph (recomputed_source_nodes). Edges
+// Helper function to recomppute a sub-graph (recomputed_source_nodes). Edges
 // from recomputed_source_nodes to target_nodes are changed to start from the
 // recomputed nodes.
 void RecomputeSubgraph(
@@ -374,9 +381,22 @@ void RecomputeSubgraph(
   std::unordered_set<string> recomputed_node_names;
   VLOG(1) << "Recomputing a " << recomputed_source_nodes.size()
           << " node subgraph";
+  
+  for (const NodeDef* sn : recomputed_source_nodes){
+    VLOG(1) << "...[DEBUG] in RecomputeSubgraph(), source_node: " << sn->name(); 
+  }
+  for (const NodeDef* tn : target_nodes){
+    VLOG(1) << "...[DEBUG] in RecomputeSubgraph(), target_node: " << tn->name(); 
+  }
+
   std::unordered_map<const NodeDef*, int> recomputed_node_components =
       GetMaxDownstreamComponents(recomputed_source_nodes, target_nodes,
                                  node_map, components);
+  for (auto n = recomputed_node_components.begin(); n != recomputed_node_components.end(); ++n)
+  {
+    VLOG(2) << "...[DEBUG] GetMaxDownstreamComponents() result: node=" << n->first->name()
+    << ", amount:" << n->second;
+  }
   for (const NodeDef* original_node : recomputed_source_nodes) {
     VLOG(2) << "  " << original_node->name();
     recomputed_node_names.insert(original_node->name());
@@ -430,6 +450,7 @@ void RecomputationRewritingPass(RewriterConfig::MemOptType optimization_level,
   // We don't use the results of this topological sort until later, but this
   // call invalidates all NodeDef pointers, so it needs to be done before we
   // start collecting those.
+  VLOG(1) << "...[DEBUG] go into RecomputationRewritingPass()";
   TF_CHECK_OK(TopologicalSort(graph));
   NodeMap node_map(graph);
   std::vector<RecomputedSubGraph> recomputed_subgraphs;
@@ -534,8 +555,8 @@ bool SchedulingPass(Cluster* cluster, GrapplerItem* item) {
       continue;
     }
     const GraphMemory::MemoryUsage& mem_usage = memory.GetPeakMemoryUsage(name);
-
-    if (mem_usage.used_memory <= prop.memory_size() * 0.8) {
+    // Danny experiment: factor 0.5
+    if (mem_usage.used_memory <= prop.memory_size() * 0.5) {
       continue;
     }
 
@@ -778,17 +799,22 @@ static const NodeDef* FindSwapInTrigger(
   // delaying the downstream computation.
   Costs::NanoSeconds max_trigger_time(0);
   std::set<string> possible_inputs;
+  VLOG(1) << "...[DEBUG] in FindSwapInTrigger(), Node:" << node->name();
   for (int i = 0; i < node->input_size(); ++i) {
     const string input_node_name = NodeName(node->input(i));
     auto it1 = name_map.find(input_node_name);
-    if (it1 == name_map.end()) {
+    if ((it1 == name_map.end()) && (i < node->input_size()-1)) {
+      continue;
+    } else {
       return nullptr;
     }
     const NodeDef* input_node = it1->second;
 
     auto it2 = execution_times.find(input_node);
     if (it2 == execution_times.end()) {
-      return nullptr;
+      //VLOG(1) << "...[DEBUG] in FindSwapInTrigger(), cannot find node:" << input_node->name() << " in execution_times";
+      //return nullptr;
+      continue;
     }
     max_trigger_time = std::max(max_trigger_time, it2->second);
     possible_inputs.insert(input_node_name);
@@ -799,10 +825,13 @@ static const NodeDef* FindSwapInTrigger(
     possible_inputs.erase(input_node_name);
   }
   if (possible_inputs.empty()) {
+    VLOG(1) << "...[DEBUG] in FindSwapInTrigger(), possible_inputs is empty!!!";
     return nullptr;
   }
 
   max_trigger_time -= swap_info.time_to_swap;
+
+  VLOG(1) << "...[DEBUG] in FindSwapInTrigger(), max_trigger_time is " << max_trigger_time;
 
   std::map<Costs::NanoSeconds, const NodeDef*> candidates;
   std::set<string> already_processed;
@@ -813,22 +842,28 @@ static const NodeDef* FindSwapInTrigger(
     already_processed.insert(input_node_name);
     auto it1 = name_map.find(input_node_name);
     if (it1 == name_map.end()) {
-      return nullptr;
+      VLOG(1) << "...[DEBUG] in FindSwapInTrigger(), name_map cannot find any input node name in possible_inputs";
+      //return nullptr;
+      continue;
     }
     const NodeDef* input_node = it1->second;
     // Don't jump over frames, since adding a control dependency from one frame
     // to the next isn't supported. Don't go through branches, since we don't
     // know whether they'll be executed or not.
-    if (ModifiesFrameInfo(*input_node) || IsSwitch(*input_node) ||
-        IsMerge(*input_node)) {
+    // Danny experiment
+    //if (ModifiesFrameInfo(*input_node) || IsSwitch(*input_node) ||
+    //    IsMerge(*input_node)) {
+    if (ModifiesFrameInfo(*input_node)) {
+      VLOG(1) << "...[DEBUG] in FindSwapInTrigger(), jump over frame: " << input_node->name();
       continue;
     }
     auto it2 = execution_times.find(input_node);
     if (it2 == execution_times.end()) {
-      return nullptr;
+      //return nullptr;
+      continue;
     }
     if (it2->second < max_trigger_time) {
-      candidates[it2->second] = input_node;
+        candidates[it2->second] = input_node;
     } else {
       for (const string& fanin : input_node->input()) {
         string name = NodeName(fanin);
@@ -895,6 +930,8 @@ static NodeDef* FindSwapOutTrigger(
   swap.port_id = input_id;
   GraphView::OutputPort generator = view.GetRegularFanin(swap);
   if (!generator.node) {
+    //VLOG(1) << "...[DEBUG] in FindSwapOutTrigger(), cannot find the Fanin output port of "
+    //<< " swap:" << swap.node->name() << ", swap_port_id:" << swap.port_id << "";
     return nullptr;
   }
 
@@ -942,9 +979,304 @@ struct MemInfo {
   bool operator<(const MemInfo& other) const { return fitness < other.fitness; }
 };
 
+/**
+ * FindAllNodesOfInputandOutputViaGraphView: 
+ * Find all the ops of input and output nodes via GraphView
+ */
+static void FindAllNodesOfInputandOutputViaGraphView(
+    const GraphView& graph_view, const GraphDef* graph) {
+  for (const auto& node : graph->node()) {
+    VLOG(1) << "...[DEBUG2] Traverse via View, node name:" << node.name();
+    // false for on control dependency
+    for (const auto& fanout : graph_view.GetFanouts(node, false)) {
+	    VLOG(1) << ".......[DEBUG2] get output name:port_id = " << fanout.node->name()
+      << ":" << fanout.port_id;
+    }
+    for (const auto& fanin : graph_view.GetFanins(node, false)) {
+	    VLOG(1) << ".......[DEBUG2] get input name:port_id = " << fanin.node->name()
+      << ":" << fanin.port_id;
+    }
+  }
+}
+
+/**
+ * FindAllNodesOfInputandOutputViaNodeMap: 
+ * Find all the ops of input and output nodes via NodeMap
+ */
+static void FindAllNodesOfInputandOutputViaNodeMap(
+    const NodeMap& node_map, const GraphDef* graph) {
+  for (const auto& node : graph->node()) {
+    VLOG(1) << "...[DEBUG2] Traverse via Map, node name:" << node.name();
+    for (const NodeDef* output_node : node_map.GetOutputs(node.name())) {
+	    VLOG(1) << ".......[DEBUG2] get output name:" << output_node->name();
+    }
+    for (const string& input_name : node.input()) {
+      const NodeDef* input_node = node_map.GetNode(input_name);
+      VLOG(1) << ".......[DEBUG2] get input name:" << input_node->name();
+    }
+  }
+}
+
+/**
+ * GetTopoOrdering: To get a topogical ordering map.
+ * @item GrapplerItem* 
+ * @return std::unordered_map<const NodeDef*, int>
+ */
+static std::unordered_map<const NodeDef*, int> GetTopoOrdering(GrapplerItem* item) {
+  std::unordered_map<const NodeDef*, int> topo_order;
+  ComputeTopologicalOrder(item->graph, &topo_order, nullptr);
+  for ( auto& n : topo_order){
+    const string& node_name = n.first->name();
+    const int order = n.second;
+    VLOG(1) << "...[DEBUG2] Node " << node_name << " at TopoOrdering order " << order;
+  }
+  return topo_order;
+}
+
+/**
+ * GetTopoFilter: To create a topogical filter list.
+ * @item GrapplerItem* 
+ * @swap_factor double, the percentage of total nodes you want to keep
+ * @return std::set<string> topogical filter list
+ */
+static std::set<string> GetTopoFilter(GrapplerItem* item, double swap_factor){
+  std::unordered_map<const NodeDef*, int> topo_order = GetTopoOrdering(item);
+  std::map<int, const NodeDef*> topo_filter;
+  for ( auto& n : topo_order){
+    if(n.first->name().find("gradients") == std::string::npos)
+      topo_filter[n.second] = n.first;
+  }
+  std::set<string> topo_filter_set;
+  int swap_amount = ceil(topo_filter.size() * swap_factor);
+  int count = 0;
+  for ( auto& n : topo_filter){
+    topo_filter_set.insert(n.second->name());
+    count++;
+    if(count > swap_amount)
+      break;
+  }
+  return topo_filter_set;
+}
+
+// Danny Experiment
+static void DumpDebugInformation(GrapplerItem* item) {
+  //GraphView my_gview(&item->graph);
+  //NodeMap my_nodemap(&item->graph);
+  //FindAllNodesOfInputandOutputViaNodeMap(my_nodemap, &item->graph);
+  //FindAllNodesOfInputandOutputViaGraphView(my_gview, &item->graph);
+  //GetTopoOrdering(item);
+}
+
+// define a pair for using
+typedef std::pair<NodeDef*, int> PAIR;
+
+// sorting by value
+struct CmpByValue {  
+  bool operator()(const PAIR& lhs, const PAIR& rhs) {  
+    return lhs.second < rhs.second;  
+  }  
+};
+// sorting by value in reverse
+struct CmpByValueReverse {  
+  bool operator()(const PAIR& lhs, const PAIR& rhs) {  
+    return lhs.second > rhs.second;  
+  }
+};
+
+// Danny Experiment
+// f1 ------> f2, from f2 back to find a trigger-in node in the path to f1
+static NodeDef* GetDirectOrderStragety(GraphView& view, 
+    std::unordered_map<string, const NodeDef*>& name_map, int input_id, NodeDef* f2,
+    const NodeMap& node_map) {
+
+  // Find the output port that generated the tensor to swap.
+  GraphView::InputPort swap;
+  swap.node = const_cast<NodeDef*>(f2);
+  swap.port_id = input_id;
+  GraphView::OutputPort generator = view.GetRegularFanin(swap);
+  NodeDef* f1 = generator.node;
+
+  // Compute a topological ordering for the node fanin.
+  std::unordered_map<NodeDef*, int> topo_order;
+  // we use pre-order: f2 -> 0, 1, 2, 3, ... -> f1
+  ReverseDfsV2(view, {f2}, f1,
+           [&topo_order](NodeDef* n) {
+             int topo_index = topo_order.size();
+             topo_order[n] = topo_index;
+           }, 
+           nullptr,
+           nullptr);
+
+  VLOG(1) << "...[DEBUG2] ...GetDirectOrderStragety() f2 name:" << f2->name()
+  << ", f1 name:" << f1->name();
+  // convert map to vector<PAIR>
+  std::vector<PAIR> topo_order_vec(topo_order.begin(), topo_order.end());
+  // sort by value
+  sort(topo_order_vec.begin(), topo_order_vec.end(), CmpByValue());  
+  //for (int i = 0; i != topo_order_vec.size(); ++i) {
+  //  auto result = name_map.find(topo_order_vec[i].first->name());
+  //  VLOG(1) << "......[DEBUG2] get topo name:" << topo_order_vec[i].first->name() << ", order:" << topo_order_vec[i].second
+  //  << ", is founded:" << (result == name_map.end() ? "No":"Yes");
+  //}
+  int grad_count = 0;
+  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
+    if((*it_i).first->name().find("gradients")!= std::string::npos)
+      grad_count++;
+  }
+  // Danny experiment:
+  VLOG(1) << "......[DEBUG2] ...get grad_count=:" << grad_count << ", topo_order_vec size=" << topo_order_vec.size();
+  //Start from trigger_in_count
+  int trigger_in_count = (int)(std::sqrt(1.0/grad_count) * 50);
+  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
+    int index = distance(topo_order_vec.begin(), it_i);
+    if((index >= trigger_in_count) && ((*it_i).first->name().find("gradients") != std::string::npos)) {
+      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name()
+      << ", order:" << (*it_i).second << ", trigger_in_count:" << trigger_in_count;
+      return (*it_i).first;
+    }
+  }
+  //Start from 10 (gradient op)
+  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
+    int index = distance(topo_order_vec.begin(), it_i);
+    if(index >= 10 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
+      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
+      << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
+      return (*it_i).first;
+    }
+  }
+  //Start from 5 (gradient op)
+  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
+    int index = distance(topo_order_vec.begin(), it_i);
+    if(index >= 5 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
+      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
+      << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
+      return (*it_i).first;
+    }
+  }
+  //Start from 2 (gradient op)
+  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
+    int index = distance(topo_order_vec.begin(), it_i);
+    if(index >= 2 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
+      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
+      << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
+      return (*it_i).first;
+    }
+  }
+  // special case, grad_count=1, like ShapeN, Shape, Shape1...
+  //trigger_in_count = (int)(std::sqrt(1.0/topo_order_vec.size()) * 80);
+  if(grad_count <= 1) {
+    // check if f2 has not gradient op as input
+    bool has_grad_input = false;
+    for (const string& input_name : f2->input()) {
+      if(node_map.GetNode(input_name)->name().find("gradients")!= std::string::npos){
+        has_grad_input = true;
+        break;
+      }
+    }
+    std::vector<const NodeDef*> _candidates;
+    if(!has_grad_input){
+      for (const NodeDef* f2_output_node : node_map.GetOutputs(f2->name())) {
+        if(f2_output_node->name().find("Shape") != std::string::npos)
+          continue;
+        // Compute a topological ordering for the node fanin.
+        for (const string& input_name : f2_output_node->input()) {
+          if(input_name != f2->name()) {
+            const NodeDef* other_input_node = node_map.GetNode(input_name);
+            std::unordered_map<NodeDef*, int> topo_order_special_case;
+            // we use pre-order: f2 -> 0, 1, 2, 3, ... -> f1
+            ReverseDfs(view, {const_cast<NodeDef*>(other_input_node)},
+                [&topo_order_special_case](NodeDef* n) {
+                int topo_index = topo_order_special_case.size();
+                topo_order_special_case[n] = topo_index;
+              }, 
+              nullptr,
+              nullptr);
+            //Start from 1 (gradient op)
+            // convert map to vector<PAIR>
+            std::vector<PAIR> topo_order_vec2(topo_order_special_case.begin(), topo_order_special_case.end());
+            // sort by value
+            sort(topo_order_vec2.begin(), topo_order_vec2.end(), CmpByValue());
+            for(std::vector<PAIR>::iterator it_i=topo_order_vec2.begin(); it_i!=topo_order_vec2.end(); ++it_i) {
+                int index = distance(topo_order_vec2.begin(), it_i);
+              if(index >= 1 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
+                VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
+                << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
+                return (*it_i).first;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  VLOG(1) << "......[DEBUG2] ...in_trigger is NULL";
+  return nullptr;
+}
+
+// Danny Experiment
+// f1 ------> f2, from f1 to find a trigger-out node in the path to f2
+static NodeDef* GetChainRuleStrategy(GraphView& view, 
+    std::unordered_map<string, const NodeDef*>& name_map, 
+    int input_id, NodeDef* f2) {
+
+  // Find the output port that generated the tensor to swap.
+  GraphView::InputPort swap;
+  swap.node = const_cast<NodeDef*>(f2);
+  swap.port_id = input_id;
+  GraphView::OutputPort generator = view.GetRegularFanin(swap);
+  NodeDef* f1 = generator.node;
+
+  // Compute a topological ordering for the node fanin.
+  std::unordered_map<NodeDef*, int> topo_order;
+  // we use post-order: f1 -> 0, 1, 2, 3, ... -> f2
+  BfsV2(view, {f1}, f2, nullptr,
+           [&topo_order](NodeDef* n) {
+             int topo_index = topo_order.size();
+             topo_order[n] = topo_index;
+           },
+           nullptr);
+
+  VLOG(1) << "...[DEBUG2] ...GetChainRuleStrategy() f1 name:" << f1->name()
+  << ", f2 name:" << f2->name();
+  // convert map to vector<PAIR>
+  std::vector<PAIR> topo_order_vec(topo_order.begin(), topo_order.end());
+  // sort by value
+  sort(topo_order_vec.begin(), topo_order_vec.end(), CmpByValue());
+  //for (int i = 0; i != topo_order_vec.size(); ++i) {
+  //  auto result = name_map.find(topo_order_vec[i].first->name());
+  //  VLOG(1) << "......[DEBUG2] get topo name:" << topo_order_vec[i].first->name() << ", order:" << topo_order_vec[i].second
+  //  << ", is founded:" << (result == name_map.end() ? "No":"Yes");
+  //}
+  // If it starts from 1, the next op will wait for CopyFromGPUtoHost finished...
+  int trigger_in_count = topo_order_vec.size() * 0.1;
+  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
+    int index = distance(topo_order_vec.begin(), it_i);
+    if((index >= trigger_in_count) && ((*it_i).first->name().find("gradients") == std::string::npos)){
+      VLOG(1) << "......[DEBUG2] ...get out-trigger name:" << (*it_i).first->name();
+      return (*it_i).first;
+    }
+  }
+  VLOG(1) << "......[DEBUG2] ...out_trigger is NULL";
+  return nullptr;
+}
+
 static bool IdentifySwappingCandidates(
     Cluster* cluster, GrapplerItem* item, std::unordered_set<string>* skip_list,
     std::unordered_map<NodeDef*, SwapInfo>* nodes_to_swap) {
+  VLOG(1) << "...[DEBUG] go into IdentifySwappingCandidates()";
+  for (const auto& f : item->feed) {
+    VLOG(1) << "...[DEBUG] item feed: " << f.first;
+  }
+  for (const auto& f : item->fetch) {
+    VLOG(1) << "...[DEBUG] item fetch: " << f;
+  }
+  // Danny experiment
+  // it live tensor node name is not in topo_filter_set,
+  // then it will be filtered out. 
+  // In other words, Factor=1.0 won't do filtering. 
+  // Factor=7.0 will filter the last 30% nodes in graph by ordering.
+  std::set<string> topo_filter_set = GetTopoFilter(item, 1.0);
+
   GraphMemory memory(*item);
   const std::unordered_map<string, DeviceProperties>& devices =
       cluster->GetDevices();
@@ -967,23 +1299,38 @@ static bool IdentifySwappingCandidates(
     }
     const GraphMemory::MemoryUsage& mem_usage = memory.GetPeakMemoryUsage(name);
 
-    if (mem_usage.used_memory <= prop.memory_size()) {
-      continue;
+    //Danny dumping live_tensors in mem_usage
+    VLOG(1) << "...[DEBUG] device name:" << name;
+    VLOG(1) << "......[DEBUG] mem_usage:" << mem_usage.used_memory;
+    for (const auto& t : mem_usage.live_tensors) {
+      VLOG(1) << "......[DEBUG] dump live_tensor name:" << t.node
+              << ", mem_used:" << t.memory_used
+              << ", output_id:" << t.output_id
+              << ", allocation_time:" << t.allocation_time
+              << ", deallocation_time:" << t.deallocation_time;
     }
-    int64 required_savings = mem_usage.used_memory - prop.memory_size();
+    // Danny experiment: we don't use static tensor shape, so turn if off because of no work.
+    //if (mem_usage.used_memory <= prop.memory_size() * 0.5) {
+    //  VLOG(1) << "...[DEBUG] in IdentifySwappingCandidates(), mem_usage.used_memory <= prop.memory_size() * 0.5";
+    //  continue;
+    //}
+    int64 required_savings = mem_usage.used_memory - prop.memory_size() * 0.1;
 
     std::unordered_map<string, Costs::NanoSeconds> op_completion_times;
     {
       VirtualCluster vcluster(cluster->GetDevices());
       if (!vcluster.Provision().ok()) {
+        VLOG(1) << "...[DEBUG] in IdentifySwappingCandidates(), vcluster.Provision() is not OK";
         return false;
       }
       if (!vcluster.Initialize(*item).ok()) {
+        VLOG(1) << "...[DEBUG] in IdentifySwappingCandidates(), vcluster.Initialize(*item) is not OK";
         return false;
       }
       RunMetadata metadata;
       Status s = vcluster.Run(item->graph, item->feed, item->fetch, &metadata);
       if (!s.ok() && s.code() != error::RESOURCE_EXHAUSTED) {
+        VLOG(1) << "...[DEBUG] in IdentifySwappingCandidates(), vcluster status is not OK";
         return false;
       }
 
@@ -1009,23 +1356,45 @@ static bool IdentifySwappingCandidates(
 
     GraphView graph(&item->graph);
     for (const auto& live_tensor : mem_usage.live_tensors) {
-      if (live_tensor.memory_used <= 1024) {
-        // Don't bother with small tensors.
+      VLOG(1) << "...[DEBUG] in IdentifySwappingCandidates(), check live tensor:" << live_tensor.node;
+      // Danny experiment
+      // Only consider live tensor comming from no name space of "gradients"
+      if(live_tensor.node.find("gradients") != std::string::npos) {
+        VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), live tensor node:"
+        << live_tensor.node << " comes from name space of gradients";
         continue;
       }
+      // Danny experiment
+      // Only consider live tensor comming from the node which is in the topo_filter_list"
+      if(topo_filter_set.find(live_tensor.node) == topo_filter_set.end()) {
+        VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), live tensor node:"
+        << live_tensor.node << " is not found in topo_filter list";
+        continue;
+      }
+      // Danny experiment
+      // because we don't consider static tensor shape, this part won't work.
+      //if (live_tensor.memory_used <= 0) {
+      //  // Don't bother with small tensors.
+      //  VLOG(1) << "...[DEBUG] ...in IdentifySwappingCandidates(), don't bother with small tensors" << live_tensor.node;
+      //  continue;
+      //}
+      // Danny experiment
+      // This part cannot be marked because it will occur segmentation fault in multi-gpus training.
       if (live_tensor.deallocation_time - live_tensor.allocation_time <=
           Costs::Duration(1e6)) {
         // Not enough time to swap.
-        VLOG(1) << "Not enough time to swap: skipping " << live_tensor.node;
+        VLOG(1) << "...[DEBUG] ...in IdentifySwappingCandidates(), Not enough time to swap: skipping " << live_tensor.node;
         continue;
       }
 
       if (skip_list->find(live_tensor.node) != skip_list->end()) {
+        VLOG(1) << "...[DEBUG] ...in IdentifySwappingCandidates(), skip_list finds the node:" << live_tensor.node;
         continue;
       }
       GraphView::OutputPort port =
           graph.GetOutputPort(live_tensor.node, live_tensor.output_id);
       if (!IsSwappable(graph, port)) {
+        VLOG(1) << "...[DEBUG] ...in IdentifySwappingCandidates(), node:" << live_tensor.node << ", output port: " << port.port_id << "is not swappable!!";
         continue;
       }
       MemInfo mem_info;
@@ -1035,28 +1404,48 @@ static bool IdentifySwappingCandidates(
       Costs::Duration earliest_use(Costs::Duration::infinity());
       bool valid = true;
       for (GraphView::InputPort input : graph.GetFanout(port)) {
+        VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), check live tensor:" << live_tensor.node
+                << " input port name:" << input.node->name();
+        // Danny experiment 
+        // Only consider input node with name space of "gradients"
+        if(input.node->name().find("gradients") == std::string::npos) {
+          VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), input node:"
+          << input.node->name() << " needs with name space of gradients";
+          continue;
+        }
         // Get execution time.
         auto it = op_completion_times.find(input.node->name());
         if (it == op_completion_times.end()) {
           valid = false;
+          VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), InputPort: " << input.port_id 
+                  << " is not found in op_completion_times";
           break;
         }
-        if (it->second <= peak_time) {
-          continue;
-        }
+        // Danny experiment, we want more tensors to be swapped. so, turn if off.
+        //if (it->second <= peak_time) {
+        //  VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), InputPort: " << input.port_id 
+        //          << " completion time is less then peak_time";
+        //  continue;
+        //}
 
         if (skip_list->find(input.node->name()) != skip_list->end()) {
           valid = false;
+          VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), InputPort: " << input.port_id 
+                  << " is in skip_list";
           break;
         }
         string input_name =
             strings::StrCat(input.node->name(), ":", input.port_id);
         if (skip_list->find(input_name) != skip_list->end()) {
           valid = false;
+          VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), input_name: " << input_name 
+                  << " is in skip_list";
           break;
         }
         if (!IsSwappable(input)) {
           valid = false;
+           VLOG(1) << "......[DEBUG] ...in IdentifySwappingCandidates(), InputPort: " << input.port_id 
+                  << " is not found in swappable";
           break;
         }
 
@@ -1078,15 +1467,18 @@ static bool IdentifySwappingCandidates(
             MathUtil::IPow((allocation_time - peak_time).count(), 2);
         mem_info.fitness = -mem_info.fitness;
         mem_state.push_back(mem_info);
+        VLOG(1) << "...[DEBUG] ...in IdentifySwappingCandidates(), mem_info.fitness:" 
+                <<  mem_info.fitness;
       }
     }
 
+    VLOG(1) << "...[DEBUG] in IdentifySwappingCandidates(), sort by fitness";
     // Sort by fitness
     std::sort(mem_state.begin(), mem_state.end());
 
     for (const MemInfo& mem_info : mem_state) {
       for (const GraphView::InputPort fanout_to_swap : mem_info.uses_left) {
-        VLOG(1) << "Will swap fanout " << fanout_to_swap.node->name() << ":"
+        VLOG(1) << "...[DEBUG] ...Will swap fanout " << fanout_to_swap.node->name() << ":"
                 << fanout_to_swap.port_id << " of tensor "
                 << mem_info.port.node->name() << ":" << mem_info.port.port_id
                 << " of size " << mem_info.memory_used;
@@ -1096,9 +1488,10 @@ static bool IdentifySwappingCandidates(
       }
       required_savings -= mem_info.memory_used;
       updated_graph = true;
-      if (required_savings < 0) {
-        break;
-      }
+      // Danny experiment, we don't need to consider required_saving.
+      //if (required_savings < 0) {
+      //  break;
+      //}
     }
   }
   return updated_graph;
@@ -1113,6 +1506,7 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
       optimization_level == RewriterConfig::HEURISTICS) {
     // Use heuristics to figure out what needs to be swapped;
     IdentifySwappingCandidates(cluster, item, skip_list, &nodes_to_swap);
+    DumpDebugInformation(item);
   }
   // Look for manual annotatations in the graph.
   for (auto& node : *item->graph.mutable_node()) {
@@ -1131,93 +1525,124 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
   }
   if (nodes_to_swap.empty()) {
     // Nothing to do.
+    VLOG(1) << "...[DEBUG] ...in SwappingPass()... nodes_to_swap is empty...";
     return false;
   }
 
   // Estimate the size of the data to swap for each node.
   GraphProperties properties(*item);
   if (!properties.InferStatically(true).ok()) {
+    VLOG(1) << "...[DEBUG] ...in SwappingPass()... infer statically is not OK ...";
     return false;
   }
+  VLOG(1) << "...[DEBUG] got into SwappingPass()";
   for (auto& swap : nodes_to_swap) {
     const NodeDef* node = swap.first;
     const std::vector<OpInfo::TensorProperties>& props =
         properties.GetInputProperties(node->name());
     SwapInfo& swap_info = swap.second;
     int64 bytes_to_swap = 0;
+    VLOG(1) << "...[DEBUG] in SwappingPass(), print node name:" << node->name();
     for (int64 input_id : swap_info.inputs_to_swap) {
       const OpInfo::TensorProperties& t = props[input_id];
       bytes_to_swap += EstimateSize(t);
     }
-    // Let's assume we're going to swap over PCIe running at 16 GBps.
+    // Let's assume we're going to swap over PCIe running at 32 GBps.
     swap_info.time_to_swap = bytes_to_swap / 16;
   }
 
   std::unordered_map<const NodeDef*, Costs::NanoSeconds> execution_times;
   if (!EstimateEarliestExecutionTimes(*item, cluster, &execution_times).ok()) {
+    VLOG(1) << "...[DEBUG] ...in SwappingPass()...  estimate execution time is not OK ...";
     return false;
   }
+
+  // Get the the topological order of all nodes
+  //std::unordered_map<const NodeDef*, int> topo_order_map;
+  //ComputeTopologicalOrder(item->graph, &topo_order_map, nullptr);
 
   std::unordered_map<string, const NodeDef*> name_map;
   for (const auto& node : item->graph.node()) {
     name_map[node.name()] = &node;
   }
   GraphView view(&item->graph);
-
+  NodeMap node_map(&item->graph);
   bool updated_graph = false;
 
+  VLOG(1) << "...[DEBUG] ...in SwappingPass() for doing swap";
   for (auto& swap : nodes_to_swap) {
     NodeDef* node = swap.first;
+    VLOG(1) << "...[DEBUG] ...in SwappingPass(), the node name to swap in:" << node->name();
     const SwapInfo& swap_info = swap.second;
     if (skip_list->find(node->name()) != skip_list->end()) {
+      VLOG(1) << "...[DEBUG] ...in SwappingPass(), node:" << node->name() << " in skip list....";
       continue;
     }
 
     // Make sure the tensor isn't swapped back in right away: look for node that
     // will execute just before we need to swap the data back, and add a control
     // dependency from that node to the swap node.
-    const NodeDef* in_trigger =
-        FindSwapInTrigger(node, swap_info, name_map, execution_times);
+    // Danny experiment: turn if off because we use new version of in_trigger
+    //const NodeDef* in_trigger =
+    //    FindSwapInTrigger(node, swap_info, name_map, execution_times);
     // If we failed, don't attempt to reprocess this node in a subsequent pass.
-    if (!in_trigger) {
-      skip_list->insert(node->name());
-      continue;
-    }
+    //if (!in_trigger) {
+    //  skip_list->insert(node->name());
+    //  VLOG(1) << "...[DEBUG] ...in SwappingPass(), not in swapin trigger";
+    //  continue;
+    //}
 
     // Swap all the tensors that are marked with the 'swap_to_host' attribute.
     for (int input_id : swap_info.inputs_to_swap) {
       string input_name = strings::StrCat(node->name(), ":", input_id);
       if (skip_list->find(input_name) != skip_list->end()) {
+        VLOG(1) << "...[DEBUG] ...in SwappingPass(), input_name:" << input_name << " is found in skip_list";
         continue;
       } else {
         // Don't attempt to reprocess this input in a subsequent pass.
-        skip_list->insert(input_name);
+        //skip_list->insert(input_name);
+      }
+
+      // Danny experiment: the new implementations of out_trigger and in_trigger
+      NodeDef* out_trigger = GetChainRuleStrategy(view, name_map, input_id, node);
+      NodeDef* in_trigger = GetDirectOrderStragety(view, name_map, input_id, node, 
+          node_map);
+      
+      if (!in_trigger) {
+        //skip_list->insert(node->name());
+        continue;
       }
 
       // Make sure the tensor is swapped out quickly: look for node that
       // will execute just after the tensor is generated and add a control
       // dependency from the swap out node to that node.
-      NodeDef* out_trigger =
-          FindSwapOutTrigger(node, input_id, view, execution_times);
-      if (!out_trigger) {
-        continue;
-      }
+      // Danny experiment: turn if off because we use new version of out_trigger
+      //NodeDef* out_trigger =
+      //    FindSwapOutTrigger(node, input_id, view, execution_times);
+      //if (!out_trigger) {
+      //  VLOG(1) << "...[DEBUG] ...in SwappingPass(), ...out_trigger is NULL";
+      //  continue;
+      //}
 
       std::pair<NodeDef*, NodeDef*> swap_nodes;
       if (!BuildSwapPair(node, input_id, name_map, &item->graph, &swap_nodes)
                .ok()) {
+        VLOG(1) << "...[DEBUG] ...in SwappingPass(), ...build swap pair is failed...";
         continue;
       }
       *swap_nodes.first->add_input() = node->input(input_id);
       *node->mutable_input(input_id) = swap_nodes.second->name();
 
       // Add the control dependencies needed to delay the execution of the swap.
-      out_trigger->add_input(strings::StrCat("^", swap_nodes.first->name()));
+      if (out_trigger) {
+        out_trigger->add_input(strings::StrCat("^", swap_nodes.first->name()));
+      }
       swap_nodes.second->add_input(strings::StrCat("^", in_trigger->name()));
 
       // Make sure we won't try to swap the swap nodes in subsequent passes.
       skip_list->insert(swap_nodes.first->name());
       skip_list->insert(swap_nodes.second->name());
+      VLOG(1) << "...[DEBUG] ...in SwappingPass(), yes, done with swapping.....!!!!!!!!!";
     }
   }
   return updated_graph;
@@ -1342,3 +1767,4 @@ void MemoryOptimizer::Feedback(Cluster* cluster, const GrapplerItem& item,
 
 }  // end namespace grappler
 }  // end namespace tensorflow
+
