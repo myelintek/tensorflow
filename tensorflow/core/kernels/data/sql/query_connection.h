@@ -12,12 +12,15 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef THIRD_PARTY_TENSORFLOW_CORE_KERNELS_DATA_SQL_QUERY_CONNECTION_H_
-#define THIRD_PARTY_TENSORFLOW_CORE_KERNELS_DATA_SQL_QUERY_CONNECTION_H_
+#ifndef TENSORFLOW_CORE_KERNELS_DATA_SQL_QUERY_CONNECTION_H_
+#define TENSORFLOW_CORE_KERNELS_DATA_SQL_QUERY_CONNECTION_H_
 
 #include "tensorflow/core/framework/tensor.h"
 
 namespace tensorflow {
+namespace data {
+
+class IteratorContext;
 
 namespace sql {
 // This interface allows a user to connect to a database, execute a query, and
@@ -56,12 +59,12 @@ class QueryConnection {
   // If there are no more rows in the result set, then instead `true` will be
   // stored in `*end_of_sequence`, and the content of `*out_tensors` will be
   // undefined.
-  virtual Status GetNext(std::vector<Tensor>* out_tensors,
+  virtual Status GetNext(IteratorContext* ctx, std::vector<Tensor>* out_tensors,
                          bool* end_of_sequence) = 0;
 };
 
 }  // namespace sql
-
+}  // namespace data
 }  // namespace tensorflow
 
-#endif  // THIRD_PARTY_TENSORFLOW_CORE_KERNELS_DATA_SQL_QUERY_CONNECTION_H_
+#endif  // TENSORFLOW_CORE_KERNELS_DATA_SQL_QUERY_CONNECTION_H_

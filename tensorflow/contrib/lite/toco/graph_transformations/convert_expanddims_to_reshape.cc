@@ -25,36 +25,34 @@ limitations under the License.
 
 namespace toco {
 
-bool ConvertExpandDimsToReshape::Run(Model* model, std::size_t op_index) {
+::tensorflow::Status ConvertExpandDimsToReshape::Run(Model* model,
+                                                     std::size_t op_index,
+                                                     bool* modified) {
+  *modified = false;
   auto expand_it = model->operators.begin() + op_index;
   if (expand_it->get()->type != OperatorType::kExpandDims) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
   ExpandDimsOperator* expand_op =
       static_cast<ExpandDimsOperator*>(expand_it->get());
   CHECK_EQ(expand_op->inputs.size(), 2);
   CHECK_EQ(expand_op->outputs.size(), 1);
 
-  const auto& input_array = *model->arrays[expand_op->inputs[0]];
+  const auto& input_array = model->GetArray(expand_op->inputs[0]);
   if (!input_array.has_shape()) {
     // Yield until input dims have been resolved.
-    return false;
-  }
-  if (input_array.shape().dimensions_count() == 0) {
-    // Input array cannot be 0-D.
-    // (Unsure if this is TF behavior, but was required to get a test to pass.)
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
-  const auto& axis_array = *model->arrays[expand_op->inputs[1]];
+  const auto& axis_array = model->GetArray(expand_op->inputs[1]);
   if (!axis_array.has_shape()) {
     // Yield until input axis array shape has been resolved.
-    return false;
+    return ::tensorflow::Status::OK();
   }
   CHECK_EQ(RequiredBufferSizeForShape(axis_array.shape()), 1);
   if (!axis_array.buffer) {
     // Yield until the input axis array is constant
-    return false;
+    return ::tensorflow::Status::OK();
   }
   int axis = axis_array.GetBuffer<ArrayDataType::kInt32>().data[0];
   std::vector<int> reshape_dims(input_array.shape().dims());
@@ -86,7 +84,7 @@ bool ConvertExpandDimsToReshape::Run(Model* model, std::size_t op_index) {
   if (IsDiscardableArray(*model, axis_array_name) &&
       CountOpsWithInput(*model, axis_array_name) == 1 &&
       !GetOpWithOutput(*model, axis_array_name)) {
-    model->arrays.erase(axis_array_name);
+    model->EraseArray(axis_array_name);
   }
 
   // Replace the operator in the graph.
@@ -95,7 +93,8 @@ bool ConvertExpandDimsToReshape::Run(Model* model, std::size_t op_index) {
   CHECK_EQ(expand_it->get(), expand_op);
   model->operators.erase(expand_it);
 
-  return true;
+  *modified = true;
+  return ::tensorflow::Status::OK();
 }
 
 }  // namespace toco

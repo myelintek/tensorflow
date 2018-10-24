@@ -17,10 +17,10 @@ limitations under the License.
 #include "tensorflow/core/kernels/data/dataset.h"
 
 namespace tensorflow {
-
+namespace data {
 namespace {
 
-// See documentation in ../ops/dataset_ops.cc for a high-level
+// See documentation in ../../ops/dataset_ops.cc for a high-level
 // description of the following op.
 
 class SkipDatasetOp : public UnaryDatasetOpKernel {
@@ -38,23 +38,20 @@ class SkipDatasetOp : public UnaryDatasetOpKernel {
   }
 
  private:
-  class Dataset : public GraphDatasetBase {
+  class Dataset : public DatasetBase {
    public:
     Dataset(OpKernelContext* ctx, int64 count, const DatasetBase* input)
-        : GraphDatasetBase(ctx), count_(count), input_(input) {
+        : DatasetBase(DatasetContext(ctx)), count_(count), input_(input) {
       input_->Ref();
     }
 
     ~Dataset() override { input_->Unref(); }
 
-    std::unique_ptr<IteratorBase> MakeIterator(
+    std::unique_ptr<IteratorBase> MakeIteratorInternal(
         const string& prefix) const override {
       if (count_ < 0) {
         return std::unique_ptr<IteratorBase>(
             new EmptyIterator({this, strings::StrCat(prefix, "::EmptySkip")}));
-      } else if (count_ == 0) {
-        // Pass through.
-        return input_->MakeIterator(prefix);
       } else {
         return std::unique_ptr<IteratorBase>(new FiniteIterator(
             {this, strings::StrCat(prefix, "::FiniteSkip")}));
@@ -68,13 +65,14 @@ class SkipDatasetOp : public UnaryDatasetOpKernel {
       return input_->output_shapes();
     }
 
-    string DebugString() override { return "SkipDatasetOp::Dataset"; }
+    string DebugString() const override { return "SkipDatasetOp::Dataset"; }
 
    protected:
-    Status AsGraphDefInternal(OpKernelContext* ctx, DatasetGraphDefBuilder* b,
+    Status AsGraphDefInternal(SerializationContext* ctx,
+                              DatasetGraphDefBuilder* b,
                               Node** output) const override {
       Node* input_graph_node = nullptr;
-      TF_RETURN_IF_ERROR(b->AddParentDataset(ctx, input_, &input_graph_node));
+      TF_RETURN_IF_ERROR(b->AddInputDataset(ctx, input_, &input_graph_node));
       Node* count = nullptr;
       TF_RETURN_IF_ERROR(b->AddScalar(count_, &count));
       TF_RETURN_IF_ERROR(
@@ -108,9 +106,11 @@ class SkipDatasetOp : public UnaryDatasetOpKernel {
     class FiniteIterator : public DatasetIterator<Dataset> {
      public:
       explicit FiniteIterator(const Params& params)
-          : DatasetIterator<Dataset>(params),
-            i_(0),
-            input_impl_(params.dataset->input_->MakeIterator(params.prefix)) {}
+          : DatasetIterator<Dataset>(params), i_(0) {}
+
+      Status Initialize(IteratorContext* ctx) override {
+        return dataset()->input_->MakeIterator(ctx, prefix(), &input_impl_);
+      }
 
       Status GetNextInternal(IteratorContext* ctx,
                              std::vector<Tensor>* out_tensors,
@@ -128,8 +128,8 @@ class SkipDatasetOp : public UnaryDatasetOpKernel {
         while (i_ < dataset()->count_) {
           // Fetch and throw away Tensors.
           std::vector<Tensor> dummy_out_tensors;
-          TF_RETURN_IF_ERROR(input_impl_->GetNext(ctx, &dummy_out_tensors,
-                                                  end_of_sequence));
+          TF_RETURN_IF_ERROR(
+              input_impl_->GetNext(ctx, &dummy_out_tensors, end_of_sequence));
           if (*end_of_sequence) {
             // We reached the end before the count was reached.
             input_impl_.reset();
@@ -140,8 +140,8 @@ class SkipDatasetOp : public UnaryDatasetOpKernel {
         }
 
         // Return GetNext() on the underlying iterator.
-        TF_RETURN_IF_ERROR(input_impl_->GetNext(ctx, out_tensors,
-                                                end_of_sequence));
+        TF_RETURN_IF_ERROR(
+            input_impl_->GetNext(ctx, out_tensors, end_of_sequence));
         if (*end_of_sequence) {
           input_impl_.reset();
         }
@@ -153,7 +153,7 @@ class SkipDatasetOp : public UnaryDatasetOpKernel {
         mutex_lock l(mu_);
         TF_RETURN_IF_ERROR(writer->WriteScalar(full_name("i"), i_));
         if (input_impl_) {
-          TF_RETURN_IF_ERROR(SaveParent(writer, input_impl_));
+          TF_RETURN_IF_ERROR(SaveInput(writer, input_impl_));
         } else {
           TF_RETURN_IF_ERROR(
               writer->WriteScalar(full_name("input_impl_empty"), ""));
@@ -166,7 +166,7 @@ class SkipDatasetOp : public UnaryDatasetOpKernel {
         mutex_lock l(mu_);
         TF_RETURN_IF_ERROR(reader->ReadScalar(full_name("i"), &i_));
         if (!reader->Contains(full_name("input_impl_empty"))) {
-          TF_RETURN_IF_ERROR(RestoreParent(ctx, reader, input_impl_));
+          TF_RETURN_IF_ERROR(RestoreInput(ctx, reader, input_impl_));
         } else {
           input_impl_.reset();
         }
@@ -184,9 +184,8 @@ class SkipDatasetOp : public UnaryDatasetOpKernel {
   };
 };
 
-REGISTER_KERNEL_BUILDER(Name("SkipDataset").Device(DEVICE_CPU),
-                        SkipDatasetOp);
+REGISTER_KERNEL_BUILDER(Name("SkipDataset").Device(DEVICE_CPU), SkipDatasetOp);
 
 }  // namespace
-
+}  // namespace data
 }  // namespace tensorflow

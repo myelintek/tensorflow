@@ -56,7 +56,7 @@ class ItemTest(test.TestCase):
       mg = meta_graph.create_meta_graph_def(graph=g)
       grappler_item = item.Item(mg)
       op_list = grappler_item.IdentifyImportantOps()
-      self.assertItemsEqual([b'Const', b'Const_1', b'add'], op_list)
+      self.assertItemsEqual(['Const', 'Const_1', 'add'], op_list)
 
   def testOpProperties(self):
     with ops.Graph().as_default() as g:
@@ -110,8 +110,8 @@ class ItemTest(test.TestCase):
   def testColocationContraints(self):
     with ops.Graph().as_default() as g:
       c = constant_op.constant([10])
-      v = variables.Variable([3], dtype=dtypes.int32)
-      i = gen_array_ops._ref_identity(v)
+      v = variables.VariableV1([3], dtype=dtypes.int32)
+      i = gen_array_ops.ref_identity(v)
       a = state_ops.assign(i, c)
       train_op = ops.get_collection_ref(ops.GraphKeys.TRAIN_OP)
       train_op.append(a)

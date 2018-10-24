@@ -20,6 +20,7 @@ from __future__ import print_function
 from tensorflow.contrib.rnn.ops import gen_gru_ops
 from tensorflow.contrib.util import loader
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor_shape
 from tensorflow.python.layers import base as base_layer
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import init_ops
@@ -32,7 +33,7 @@ from tensorflow.python.util.deprecation import deprecated_args
 _gru_ops_so = loader.load_op_library(
     resource_loader.get_path_to_datafile("_gru_ops.so"))
 
-LayerRNNCell = rnn_cell_impl._LayerRNNCell  # pylint: disable=invalid-name,protected-access
+LayerRNNCell = rnn_cell_impl.LayerRNNCell  # pylint: disable=invalid-name
 
 
 @ops.RegisterGradient("GRUBlockCell")
@@ -176,7 +177,7 @@ class GRUBlockCell(LayerRNNCell):
 
   def build(self, input_shape):
     # Check if the input size exist.
-    input_size = input_shape[1].value
+    input_size = tensor_shape.dimension_value(input_shape[1])
     if input_size is None:
       raise ValueError("Expecting input_size to be set.")
 
@@ -221,7 +222,7 @@ class GRUBlockCellV2(GRUBlockCell):
 
   def build(self, input_shape):
     """GRU cell."""
-    input_size = input_shape[1].value
+    input_size = tensor_shape.dimension_value(input_shape[1])
     if input_size is None:
       raise ValueError("Expecting input_size to be set.")
 

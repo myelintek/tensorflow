@@ -10,35 +10,35 @@ package(
 
 licenses(["notice"])  # Apache 2.0
 
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        include = [
-            "**/*",
-        ],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-)
-
 py_library(
     name = "cluster_resolver_pip",
-    srcs = [
-        "__init__.py",
-        "python/training/__init__.py",
-    ],
     srcs_version = "PY2AND3",
+    visibility = ["//visibility:public"],
     deps = [
         ":cluster_resolver_py",
-        ":gce_cluster_resolver_py",
-        ":tpu_cluster_resolver_py",
     ],
 )
 
 py_library(
     name = "cluster_resolver_py",
+    srcs = [
+        "__init__.py",
+        "python/training/__init__.py",
+    ],
+    srcs_version = "PY2AND3",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":base_cluster_resolver_py",
+        ":gce_cluster_resolver_py",
+        ":kubernetes_cluster_resolver_py",
+        ":slurm_cluster_resolver_py",
+        ":tpu_cluster_resolver_py",
+        "//tensorflow/python:util",
+    ],
+)
+
+py_library(
+    name = "base_cluster_resolver_py",
     srcs = ["python/training/cluster_resolver.py"],
     srcs_version = "PY2AND3",
     deps = [
@@ -51,7 +51,7 @@ py_library(
     srcs = ["python/training/gce_cluster_resolver.py"],
     srcs_version = "PY2AND3",
     deps = [
-        ":cluster_resolver_py",
+        ":base_cluster_resolver_py",
         "//tensorflow/python:training",
     ],
 )
@@ -61,13 +61,33 @@ py_library(
     srcs = ["python/training/tpu_cluster_resolver.py"],
     srcs_version = "PY2AND3",
     deps = [
-        ":cluster_resolver_py",
+        ":base_cluster_resolver_py",
+        "//tensorflow/python:training",
+    ],
+)
+
+py_library(
+    name = "slurm_cluster_resolver_py",
+    srcs = ["python/training/slurm_cluster_resolver.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":base_cluster_resolver_py",
+        "//tensorflow/python:training",
+    ],
+)
+
+py_library(
+    name = "kubernetes_cluster_resolver_py",
+    srcs = ["python/training/kubernetes_cluster_resolver.py"],
+    srcs_version = "PY2AND3",
+    deps = [
+        ":base_cluster_resolver_py",
         "//tensorflow/python:training",
     ],
 )
 
 tf_py_test(
-    name = "cluster_resolver_py_test",
+    name = "base_cluster_resolver_py_test",
     srcs = ["python/training/cluster_resolver_test.py"],
     additional_deps = [
         ":cluster_resolver_py",
@@ -108,5 +128,39 @@ tf_py_test(
         "//tensorflow/python:platform_test",
         "//tensorflow/python:training",
     ],
+    grpc_enabled = True,
     main = "python/training/tpu_cluster_resolver_test.py",
+)
+
+tf_py_test(
+    name = "slurm_cluster_resolver_py_test",
+    size = "small",
+    srcs = ["python/training/slurm_cluster_resolver_test.py"],
+    additional_deps = [
+        ":cluster_resolver_py",
+        ":slurm_cluster_resolver_py",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:framework_for_generated_wrappers",
+        "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python:platform_test",
+        "//tensorflow/python:training",
+    ],
+    main = "python/training/slurm_cluster_resolver_test.py",
+    tags = [],
+)
+
+tf_py_test(
+    name = "kubernetes_cluster_resolver_py_test",
+    size = "small",
+    srcs = ["python/training/kubernetes_cluster_resolver_test.py"],
+    additional_deps = [
+        ":cluster_resolver_py",
+        ":kubernetes_cluster_resolver_py",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:framework_for_generated_wrappers",
+        "//tensorflow/python:framework_test_lib",
+        "//tensorflow/python:platform_test",
+        "//tensorflow/python:training",
+    ],
+    main = "python/training/kubernetes_cluster_resolver_test.py",
 )

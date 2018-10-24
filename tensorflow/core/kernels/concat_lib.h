@@ -13,8 +13,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_KERNELS_CONCAT_LIB_H_
-#define TENSORFLOW_KERNELS_CONCAT_LIB_H_
+#ifndef TENSORFLOW_CORE_KERNELS_CONCAT_LIB_H_
+#define TENSORFLOW_CORE_KERNELS_CONCAT_LIB_H_
 
 #include <vector>
 
@@ -41,10 +41,11 @@ namespace tensorflow {
 
 // Assumes all inputs are nonempty
 template <typename T>
-void ConcatCPU(DeviceBase* d,
-               const std::vector<
-                   std::unique_ptr<typename TTypes<T, 2>::ConstMatrix>>& inputs,
-               typename TTypes<T, 2>::Matrix* output);
+void ConcatCPU(
+    DeviceBase* d,
+    const std::vector<std::unique_ptr<typename TTypes<T, 2>::ConstMatrix>>&
+        inputs,
+    typename TTypes<T, 2>::Matrix* output);
 #if GOOGLE_CUDA
 template <typename T>
 void ConcatGPU(
@@ -57,11 +58,12 @@ void ConcatGPU(
 
 #ifdef TENSORFLOW_USE_SYCL
 template <typename T>
-void ConcatSYCL(const Eigen::SyclDevice& d,
-               const std::vector<
-                   std::unique_ptr<typename TTypes<T, 2>::ConstMatrix>>& inputs,
-               typename TTypes<T, 2>::Matrix* output);
-#endif // TENSORFLOW_USE_SYCL
+void ConcatSYCL(
+    const Eigen::SyclDevice& d,
+    const std::vector<std::unique_ptr<typename TTypes<T, 2>::ConstMatrix>>&
+        inputs,
+    typename TTypes<T, 2>::Matrix* output);
+#endif  // TENSORFLOW_USE_SYCL
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_KERNELS_CONCAT_LIB_H_
+#endif  // TENSORFLOW_CORE_KERNELS_CONCAT_LIB_H_

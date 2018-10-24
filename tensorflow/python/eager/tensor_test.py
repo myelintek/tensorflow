@@ -20,6 +20,7 @@ from __future__ import print_function
 
 import copy
 import re
+import sys
 
 import numpy as np
 
@@ -31,6 +32,8 @@ from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
+from tensorflow.python.ops import array_ops
+from tensorflow.python.ops import io_ops
 
 
 def _create_tensor(value, device=None, dtype=None):
@@ -111,6 +114,19 @@ class TFETensorTest(test_util.TensorFlowTestCase):
     tensor = constant_op.constant([1.0, 2.0, 3.0])
     numpy_tensor = np.asarray(tensor, dtype=np.int32)
     self.assertAllEqual(numpy_tensor, [1, 2, 3])
+
+  def testNdimsAgreesWithNumpy(self):
+    numpy_tensor = np.asarray(1.0)
+    tensor = constant_op.constant(numpy_tensor)
+    self.assertAllEqual(numpy_tensor.ndim, tensor.ndim)
+
+    numpy_tensor = np.asarray([1.0, 2.0, 3.0])
+    tensor = constant_op.constant(numpy_tensor)
+    self.assertAllEqual(numpy_tensor.ndim, tensor.ndim)
+
+    numpy_tensor = np.asarray([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]])
+    tensor = constant_op.constant(numpy_tensor)
+    self.assertAllEqual(numpy_tensor.ndim, tensor.ndim)
 
   def testCopy(self):
     t = constant_op.constant(1.0)
@@ -228,6 +244,12 @@ class TFETensorTest(test_util.TensorFlowTestCase):
           RuntimeError, "Can't copy Tensor with type string to device"):
         _create_tensor("test string")
 
+  def testInvalidUTF8ProducesReasonableError(self):
+    if sys.version_info[0] < 3:
+      self.skipTest("Test is only valid in python3.")
+    with self.assertRaises(UnicodeDecodeError):
+      io_ops.read_file(b"\xff")
+
 
 class TFETensorUtilTest(test_util.TensorFlowTestCase):
 
@@ -265,13 +287,8 @@ class TFETensorUtilTest(test_util.TensorFlowTestCase):
 
     with self.assertRaisesRegexp(
         TypeError,
-        r"tensor_list argument must be a list. Got \"EagerTensor\""):
+        r"tensors argument must be a list or a tuple. Got.*EagerTensor"):
       pywrap_tensorflow.TFE_Py_TensorShapeSlice(t1, -2)
-
-    with self.assertRaisesRegexp(
-        TypeError,
-        r"tensor_list argument must be a list. Got \"tuple\""):
-      pywrap_tensorflow.TFE_Py_TensorShapeSlice((t1,), -2)
 
   def testNegativeSliceDim(self):
     t1 = _create_tensor([1, 2], dtype=dtypes.int32)
@@ -283,6 +300,12 @@ class TFETensorUtilTest(test_util.TensorFlowTestCase):
 
   def testUnicode(self):
     self.assertEqual(constant_op.constant(u"asdf").numpy(), b"asdf")
+
+  def testFloatTensor(self):
+    self.assertEqual(dtypes.float64, _create_tensor(np.float64()).dtype)
+    self.assertEqual(dtypes.float32, _create_tensor(np.float32()).dtype)
+    self.assertEqual(dtypes.float16, _create_tensor(np.float16()).dtype)
+    self.assertEqual(dtypes.float32, _create_tensor(0.0).dtype)
 
   def testSliceDimOutOfRange(self):
     t1 = _create_tensor([[1, 2], [3, 4], [5, 6]], dtype=dtypes.int32)
@@ -318,6 +341,26 @@ class TFETensorUtilTest(test_util.TensorFlowTestCase):
         r"Slice dimension \(0\) must be smaller than rank of all tensors, "
         "but tensor at index 2 has rank 0"):
       pywrap_tensorflow.TFE_Py_TensorShapeSlice([t2, t1, t3], 0)
+
+  @test_util.assert_no_new_pyobjects_executing_eagerly
+  def testTensorDir(self):
+    t = array_ops.zeros(1)
+    t.test_attr = "Test"
+
+    instance_dir = dir(t)
+    type_dir = dir(ops.EagerTensor)
+
+    # Monkey patched attributes should show up in dir(t)
+    self.assertIn("test_attr", instance_dir)
+    instance_dir.remove("test_attr")
+    self.assertEqual(instance_dir, type_dir)
+
+  def testNonRectangularPackAsConstant(self):
+    l = [array_ops.zeros((10, 1)).numpy(), array_ops.zeros(1).numpy()]
+
+    with self.assertRaisesRegexp(
+        ValueError, "non-rectangular Python sequence"):
+      constant_op.constant(l)
 
 
 if __name__ == "__main__":

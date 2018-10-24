@@ -24,6 +24,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/stringpiece.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/platform/types.h"
 
 namespace tensorflow {
 
@@ -131,7 +132,7 @@ inline tensorflow::string* TfCheckOpHelper(::tensorflow::Status v,
   while (auto _result = ::tensorflow::TfCheckOpHelper(val, #val)) \
   LOG(level) << *(_result)
 
-#define TF_CHECK_OK(val)  TF_DO_CHECK_OK(val, FATAL)
+#define TF_CHECK_OK(val) TF_DO_CHECK_OK(val, FATAL)
 #define TF_QCHECK_OK(val) TF_DO_CHECK_OK(val, QFATAL)
 
 // DEBUG only version of TF_CHECK_OK.  Compiler still parses 'val' even in opt

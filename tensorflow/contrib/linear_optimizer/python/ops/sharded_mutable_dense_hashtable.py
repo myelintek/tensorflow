@@ -48,7 +48,9 @@ class ShardedMutableDenseHashTable(lookup.LookupInterface):
                value_dtype,
                default_value,
                empty_key,
+               deleted_key,
                num_shards=1,
+               checkpoint=True,
                name='ShardedMutableHashTable'):
     with ops.name_scope(name, 'sharded_mutable_hash_table') as scope:
       super(ShardedMutableDenseHashTable, self).__init__(key_dtype,
@@ -61,6 +63,8 @@ class ShardedMutableDenseHashTable(lookup.LookupInterface):
                 value_dtype=value_dtype,
                 default_value=default_value,
                 empty_key=empty_key,
+                deleted_key=deleted_key,
+                checkpoint=checkpoint,
                 name='%s-%d-of-%d' % (name, i + 1, num_shards)))
       self._table_shards = table_shards
       # TODO(andreasst): add a value_shape() method to LookupInterface
@@ -88,7 +92,7 @@ class ShardedMutableDenseHashTable(lookup.LookupInterface):
     if key_shape.ndims > 1:
       # If keys are a matrix (i.e. a single key is a vector), we use the first
       # element of each key vector to determine the shard.
-      keys = array_ops.slice(keys, [0, 0], [key_shape[0].value, 1])
+      keys = array_ops.slice(keys, [0, 0], [key_shape.dims[0].value, 1])
       keys = array_ops.reshape(keys, [-1])
     indices = math_ops.mod(math_ops.abs(keys), self._num_shards)
     return math_ops.cast(indices, dtypes.int32)

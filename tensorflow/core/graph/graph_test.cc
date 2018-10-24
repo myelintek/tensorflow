@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/core/graph/graph.h"
 
 #include <set>
+#include <unordered_map>
 #include <vector>
 #include "tensorflow/core/common_runtime/function.h"
 #include "tensorflow/core/framework/function_testlib.h"
@@ -24,6 +25,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/random/simple_philox.h"
+#include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/protobuf.h"
@@ -408,7 +410,7 @@ TEST_F(GraphTest, NewName) {
   EXPECT_NE(a1, a2);
   EXPECT_NE(a1, b1);
   EXPECT_NE(a2, b1);
-  EXPECT_TRUE(StringPiece(a1).starts_with("A")) << a1;
+  EXPECT_TRUE(str_util::StartsWith(a1, "A")) << a1;
 }
 
 TEST_F(GraphTest, IsValidNode) {
@@ -640,6 +642,22 @@ TEST_F(GraphTest, AddFunctionLibrary) {
   EXPECT_EQ(s.error_message(),
             "Cannot assign gradient function 'Undefined2' to 'XTimesTwo' "
             "because it already has gradient function 'Undefined'");
+}
+
+TEST_F(GraphTest, BuildNodeNameIndex) {
+  FromGraphDef(
+      "node { name: 'A' op: 'OneOutput' }"
+      "node { name: 'B' op: 'OneInputTwoOutputs' input: [ 'A:0' ] }"
+      "node { name: 'C' op: 'NoOp' } ");
+
+  auto node_name_index = graph_.BuildNodeNameIndex();
+  EXPECT_EQ(node_name_index.size(), 5);
+
+  std::vector<string> node_names{"_SOURCE", "_SINK", "A", "B", "C"};
+  for (const string& node_name : node_names) {
+    EXPECT_NE(node_name_index.find(node_name), node_name_index.end());
+    EXPECT_EQ(node_name_index[node_name], FindNode(node_name));
+  }
 }
 
 REGISTER_OP("Input").Output("o: float");

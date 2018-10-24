@@ -18,10 +18,10 @@ limitations under the License.
 #include "tensorflow/core/kernels/data/dataset.h"
 
 namespace tensorflow {
-
+namespace data {
 namespace {
 
-// See documentation in ../ops/dataset_ops.cc for a high-level
+// See documentation in ../../ops/dataset_ops.cc for a high-level
 // description of the following op.
 
 class DenseToSparseBatchDatasetOp : public UnaryDatasetOpKernel {
@@ -76,11 +76,11 @@ class DenseToSparseBatchDatasetOp : public UnaryDatasetOpKernel {
  private:
   // TODO(mrry): Push the templated code down to the raw copying routine.
   template <class T>
-  class Dataset : public GraphDatasetBase {
+  class Dataset : public DatasetBase {
    public:
     Dataset(OpKernelContext* ctx, int64 batch_size,
             const PartialTensorShape& row_shape, const DatasetBase* input)
-        : GraphDatasetBase(ctx),
+        : DatasetBase(DatasetContext(ctx)),
           batch_size_(batch_size),
           row_shape_(row_shape),
           input_(input) {
@@ -94,31 +94,32 @@ class DenseToSparseBatchDatasetOp : public UnaryDatasetOpKernel {
 
     ~Dataset() override { input_->Unref(); }
 
-    std::unique_ptr<IteratorBase> MakeIterator(
+    std::unique_ptr<IteratorBase> MakeIteratorInternal(
         const string& prefix) const override {
       return std::unique_ptr<IteratorBase>(new Iterator(
           {this, strings::StrCat(prefix, "::DenseToSparseBatch")}));
     }
 
     const DataTypeVector& output_dtypes() const override {
-      static DataTypeVector* output_dtypes_ = new DataTypeVector({DT_VARIANT});
-      return *output_dtypes_;
+      static DataTypeVector* output_dtypes = new DataTypeVector({DT_VARIANT});
+      return *output_dtypes;
     }
 
     const std::vector<PartialTensorShape>& output_shapes() const override {
       return output_shapes_;
     }
 
-    string DebugString() override {
+    string DebugString() const override {
       return strings::StrCat("DenseToSparseBatchDatasetOp(", batch_size_,
                              ")::Dataset");
     }
 
    protected:
-    Status AsGraphDefInternal(OpKernelContext* ctx, DatasetGraphDefBuilder* b,
+    Status AsGraphDefInternal(SerializationContext* ctx,
+                              DatasetGraphDefBuilder* b,
                               Node** output) const override {
       Node* input_node;
-      TF_RETURN_IF_ERROR(b->AddParentDataset(ctx, input_, &input_node));
+      TF_RETURN_IF_ERROR(b->AddInputDataset(ctx, input_, &input_node));
       Node* batch_size_node;
       TF_RETURN_IF_ERROR(b->AddScalar(batch_size_, &batch_size_node));
       Node* row_shape_node;
@@ -137,8 +138,12 @@ class DenseToSparseBatchDatasetOp : public UnaryDatasetOpKernel {
     class Iterator : public DatasetIterator<Dataset<T>> {
      public:
       explicit Iterator(const typename Iterator::Params& params)
-          : DatasetIterator<Dataset<T>>(params),
-            input_impl_(params.dataset->input_->MakeIterator(params.prefix)) {}
+          : DatasetIterator<Dataset<T>>(params) {}
+
+      Status Initialize(IteratorContext* ctx) override {
+        return DatasetIterator<Dataset<T>>::dataset()->input_->MakeIterator(
+            ctx, DatasetIterator<Dataset<T>>::prefix(), &input_impl_);
+      }
 
       Status GetNextInternal(IteratorContext* ctx,
                              std::vector<Tensor>* out_tensors,
@@ -155,7 +160,7 @@ class DenseToSparseBatchDatasetOp : public UnaryDatasetOpKernel {
 
         // Determine the size of the output tensors:
         // * dense_shape will be [`row_shape + 1`].
-        Tensor dense_shape(cpu_allocator(), DT_INT64, {row_ndims + 1});
+        Tensor dense_shape(ctx->allocator({}), DT_INT64, {row_ndims + 1});
         auto dense_shape_vec = dense_shape.vec<int64>();
         for (size_t i = 0; i < row_ndims; ++i) {
           if (row_shape.dim_size(i) == -1) {
@@ -215,10 +220,10 @@ class DenseToSparseBatchDatasetOp : public UnaryDatasetOpKernel {
 
         // * indices will be [`total_elements`, `row_shape + 1`].
         // * values will be [`total_elements`].
-        Tensor indices(cpu_allocator(), DT_INT64,
+        Tensor indices(ctx->allocator({}), DT_INT64,
                        {total_elements, row_ndims + 1});
         Tensor values(
-            cpu_allocator(),
+            ctx->allocator({}),
             DatasetIterator<Dataset<T>>::dataset()->input_->output_dtypes()[0],
             {total_elements});
         auto indices_matrix = indices.matrix<int64>();
@@ -269,14 +274,14 @@ class DenseToSparseBatchDatasetOp : public UnaryDatasetOpKernel {
      protected:
       Status SaveInternal(IteratorStateWriter* writer) override {
         mutex_lock l(mu_);
-        TF_RETURN_IF_ERROR(Iterator::SaveParent(writer, input_impl_));
+        TF_RETURN_IF_ERROR(Iterator::SaveInput(writer, input_impl_));
         return Status::OK();
       }
 
       Status RestoreInternal(IteratorContext* ctx,
                              IteratorStateReader* reader) override {
         mutex_lock l(mu_);
-        TF_RETURN_IF_ERROR(Iterator::RestoreParent(ctx, reader, input_impl_));
+        TF_RETURN_IF_ERROR(Iterator::RestoreInput(ctx, reader, input_impl_));
         return Status::OK();
       }
 
@@ -296,5 +301,5 @@ REGISTER_KERNEL_BUILDER(Name("DenseToSparseBatchDataset").Device(DEVICE_CPU),
                         DenseToSparseBatchDatasetOp);
 
 }  // namespace
-
+}  // namespace data
 }  // namespace tensorflow

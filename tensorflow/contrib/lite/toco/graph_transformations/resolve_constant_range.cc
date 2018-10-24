@@ -19,43 +19,66 @@ limitations under the License.
 
 namespace toco {
 
-bool ResolveConstantRange::Run(Model* model, std::size_t op_index) {
+template <ArrayDataType A, typename T>
+void FillRangeOutput(const Array& start_array, const Array& limit_array,
+                     const Array& delta_array, Array* output_array) {
+  // Compute buffer contents
+  T start = start_array.GetBuffer<A>().data[0];
+  T limit = limit_array.GetBuffer<A>().data[0];
+  T delta = delta_array.GetBuffer<A>().data[0];
+  auto& buffer = output_array->GetMutableBuffer<A>();
+  buffer.data.clear();
+  int size =
+      (std::is_integral<T>::value
+           ? ((std::abs(limit - start) + std::abs(delta) - 1) / std::abs(delta))
+           : std::ceil(std::abs((limit - start) / delta)));
+  for (int i = 0; i < size; ++i) {
+    buffer.data.push_back(start + i * delta);
+  }
+  CHECK_EQ(floor((limit - start) / delta), buffer.data.size());
+  CHECK_EQ(buffer.data.size(), output_array->shape().dims()[0]);
+}
+
+::tensorflow::Status ResolveConstantRange::Run(Model* model,
+                                               std::size_t op_index,
+                                               bool* modified) {
+  *modified = false;
   const auto it = model->operators.begin() + op_index;
   auto* base_op = it->get();
   if (base_op->type != OperatorType::kRange) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
   auto* op = static_cast<RangeOperator*>(base_op);
 
   CHECK_EQ(op->inputs.size(), 3);
-  const auto& start_array = *model->arrays[op->inputs[0]];
+  const auto& start_array = model->GetArray(op->inputs[0]);
   if (!start_array.has_shape()) {
     // Yield until all input dims have been resolved.
-    return false;
+    return ::tensorflow::Status::OK();
   }
-  const auto& limit_array = *model->arrays[op->inputs[1]];
+  const auto& limit_array = model->GetArray(op->inputs[1]);
   if (!limit_array.has_shape()) {
     // Yield until all input dims have been resolved.
-    return false;
+    return ::tensorflow::Status::OK();
   }
-  const auto& delta_array = *model->arrays[op->inputs[2]];
+  const auto& delta_array = model->GetArray(op->inputs[2]);
   if (!delta_array.has_shape()) {
     // Yield until all input dims have been resolved.
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   for (const auto& input : op->inputs) {
     if (!IsConstantParameterArray(*model, input)) {
       // yield if any input is mutable
-      return false;
+      return ::tensorflow::Status::OK();
     }
   }
 
   CHECK_EQ(op->outputs.size(), 1);
-  auto& output_array = *model->arrays[op->outputs[0]];
+  auto& output_array = model->GetArray(op->outputs[0]);
   if (output_array.data_type == ArrayDataType::kNone) {
     // Yield until the output type has been set by PropagateArrayDataTypes
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   CHECK_EQ(RequiredBufferSizeForShape(start_array.shape()), 1)
@@ -65,43 +88,41 @@ bool ResolveConstantRange::Run(Model* model, std::size_t op_index) {
   CHECK_EQ(RequiredBufferSizeForShape(delta_array.shape()), 1)
       << "Range op inputs must be scalar.";
 
-  CHECK(start_array.data_type == ArrayDataType::kInt32)
-      << "Range op inputs must be int32.";
-  CHECK(limit_array.data_type == ArrayDataType::kInt32)
-      << "Range op inputs must be int32.";
-  CHECK(delta_array.data_type == ArrayDataType::kInt32)
-      << "Range op inputs must be int32.";
+  CHECK(start_array.data_type == ArrayDataType::kInt32 ||
+        start_array.data_type == ArrayDataType::kFloat)
+      << "Range op inputs must be int32 or float.";
+  CHECK(limit_array.data_type == start_array.data_type)
+      << "Range op inputs type must be equal.";
+  CHECK(delta_array.data_type == start_array.data_type)
+      << "Range op inputs type must be equal.";
 
-  // Compute buffer contents
-  int start = start_array.GetBuffer<ArrayDataType::kInt32>().data[0];
-  int limit = limit_array.GetBuffer<ArrayDataType::kInt32>().data[0];
-  int delta = delta_array.GetBuffer<ArrayDataType::kInt32>().data[0];
-  auto& buffer = output_array.GetMutableBuffer<ArrayDataType::kInt32>();
-  buffer.data.clear();
-  for (int32 val = start; val < limit; val += delta) {
-    buffer.data.push_back(val);
+  if (start_array.data_type == ArrayDataType::kInt32) {
+    FillRangeOutput<ArrayDataType::kInt32, int32_t>(start_array, limit_array,
+                                                    delta_array, &output_array);
+  } else {
+    FillRangeOutput<ArrayDataType::kFloat, float>(start_array, limit_array,
+                                                  delta_array, &output_array);
   }
-  CHECK_EQ(floor((limit - start) / delta), buffer.data.size());
-  CHECK_EQ(buffer.data.size(), output_array.shape().dims()[0]);
 
   // Delete the input array if no longer used
   if (IsDiscardableArray(*model, op->inputs[0]) &&
       CountOpsWithInput(*model, op->inputs[0]) == 1) {
-    model->arrays.erase(op->inputs[0]);
+    model->EraseArray(op->inputs[0]);
   }
   if (IsDiscardableArray(*model, op->inputs[1]) &&
       CountOpsWithInput(*model, op->inputs[1]) == 1) {
-    model->arrays.erase(op->inputs[1]);
+    model->EraseArray(op->inputs[1]);
   }
   if (IsDiscardableArray(*model, op->inputs[2]) &&
       CountOpsWithInput(*model, op->inputs[2]) == 1) {
-    model->arrays.erase(op->inputs[2]);
+    model->EraseArray(op->inputs[2]);
   }
 
   // Delete the operator
   model->operators.erase(it);
 
-  return true;
+  *modified = true;
+  return ::tensorflow::Status::OK();
 }
 
 }  // namespace toco

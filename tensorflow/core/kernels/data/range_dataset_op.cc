@@ -17,10 +17,10 @@ limitations under the License.
 #include "tensorflow/core/kernels/data/dataset.h"
 
 namespace tensorflow {
-
+namespace data {
 namespace {
 
-// See documentation in ../ops/dataset_ops.cc for a high-level
+// See documentation in ../../ops/dataset_ops.cc for a high-level
 // description of the following op.
 
 class RangeDatasetOp : public DatasetOpKernel {
@@ -43,12 +43,15 @@ class RangeDatasetOp : public DatasetOpKernel {
   }
 
  private:
-  class Dataset : public GraphDatasetBase {
+  class Dataset : public DatasetBase {
    public:
     Dataset(OpKernelContext* ctx, int64 start, int64 stop, int64 step)
-        : GraphDatasetBase(ctx), start_(start), stop_(stop), step_(step) {}
+        : DatasetBase(DatasetContext(ctx)),
+          start_(start),
+          stop_(stop),
+          step_(step) {}
 
-    std::unique_ptr<IteratorBase> MakeIterator(
+    std::unique_ptr<IteratorBase> MakeIteratorInternal(
         const string& prefix) const override {
       return std::unique_ptr<IteratorBase>(
           new Iterator({this, strings::StrCat(prefix, "::Range")}));
@@ -65,13 +68,14 @@ class RangeDatasetOp : public DatasetOpKernel {
       return *shapes;
     }
 
-    string DebugString() override {
+    string DebugString() const override {
       return strings::StrCat("RangeDatasetOp(", start_, ", ", stop_, ", ",
                              step_, ")::Dataset");
     }
 
    protected:
-    Status AsGraphDefInternal(DatasetGraphDefBuilder* b,
+    Status AsGraphDefInternal(SerializationContext* ctx,
+                              DatasetGraphDefBuilder* b,
                               Node** output) const override {
       Node* start = nullptr;
       Node* stop = nullptr;
@@ -100,7 +104,7 @@ class RangeDatasetOp : public DatasetOpKernel {
           *end_of_sequence = true;
           return Status::OK();
         }
-        Tensor value_tensor(cpu_allocator(), DT_INT64, {});
+        Tensor value_tensor(ctx->allocator({}), DT_INT64, {});
         value_tensor.scalar<int64>()() = next_;
         out_tensors->emplace_back(std::move(value_tensor));
         *end_of_sequence = false;
@@ -138,5 +142,5 @@ REGISTER_KERNEL_BUILDER(Name("RangeDataset").Device(DEVICE_CPU),
                         RangeDatasetOp);
 
 }  // namespace
-
+}  // namespace data
 }  // namespace tensorflow

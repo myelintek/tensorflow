@@ -44,10 +44,12 @@ BufferErrorReporter::BufferErrorReporter(JNIEnv* env, int limit) {
   buffer_ = new char[limit];
   if (!buffer_) {
     throwException(env, kNullPointerException,
-                   "Malloc of BufferErrorReporter to hold %d char failed.",
+                   "Internal error: Malloc of BufferErrorReporter to hold %d "
+                   "char failed.",
                    limit);
     return;
   }
+  buffer_[0] = '\0';
   start_idx_ = 0;
   end_idx_ = limit - 1;
 }

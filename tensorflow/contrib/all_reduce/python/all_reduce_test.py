@@ -26,6 +26,7 @@ from tensorflow.contrib.all_reduce.python import all_reduce as ar
 from tensorflow.core.framework import types_pb2
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import ops
+from tensorflow.python.framework import tensor_shape
 from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
@@ -35,6 +36,12 @@ from tensorflow.python.platform import tf_logging
 
 
 class AllReduceTest(test_util.TensorFlowTestCase):
+
+  def testFlattenTensorsShapesDefined(self):
+    x = array_ops.placeholder(types_pb2.DT_FLOAT, [None])
+    with self.assertRaisesRegexp(ValueError,
+                                 "must have statically known shape"):
+      ar._flatten_tensors([x, x])
 
   def testRingPermutations(self):
     # 0 devices
@@ -110,7 +117,7 @@ class AllReduceTest(test_util.TensorFlowTestCase):
     # same number outputs as inputs
     self.assertEqual(len(output_tensors), len(input_tensors))
     num_chunks = 2 * len(input_tensors)
-    tlen = input_tensors[0].shape[0].value
+    tlen = tensor_shape.dimension_value(input_tensors[0].shape[0])
     for otl in output_tensors:
       self.assertEqual(len(otl), num_chunks)
       for ot in otl:
@@ -119,7 +126,7 @@ class AllReduceTest(test_util.TensorFlowTestCase):
   def _buildInitialVars(self, shape, dev_list):
     values = []
     num_devices = len(dev_list)
-    dim = np.prod(shape)
+    dim = np.prod(shape) if shape else 1
     for d in range(0, num_devices):
       with ops.device(dev_list[d]):
         npt = np.zeros(shape).astype(np.float32)
@@ -143,7 +150,7 @@ class AllReduceTest(test_util.TensorFlowTestCase):
     num_devices = num_workers * num_gpus
     dev_list = ["/replica:0/task:0/device:CPU:0"
                 for _ in range(num_devices)]
-    with self.test_session():
+    with self.cached_session():
       input_tensors = self._buildInitialVars(shape, dev_list)
       un_op = lambda x: math_ops.div(
           x, constant_op.constant(num_devices, dtype=types_pb2.DT_FLOAT))
@@ -164,6 +171,7 @@ class AllReduceTest(test_util.TensorFlowTestCase):
                     (num_workers, num_gpus, shape, subdiv, elapsed))
 
   def testRingAllReduce(self):
+    self._testRingAllReduce(1, 2, [], 1)
     self._testRingAllReduce(1, 2, [8], 1)
     self._testRingAllReduce(1, 2, [4, 4], 1)
     self._testRingAllReduce(6, 1, [8], 1)
@@ -192,6 +200,7 @@ class AllReduceTest(test_util.TensorFlowTestCase):
                     "elapsed=%f" % (num_workers, num_gpus, shape, elapsed))
 
   def testShuffleAllReduce(self):
+    self._testShuffleAllReduce(1, 2, [], 1)
     self._testShuffleAllReduce(1, 2, [8], 1)
     self._testShuffleAllReduce(1, 2, [4, 4], 1)
     self._testShuffleAllReduce(1, 8, [32], 1)

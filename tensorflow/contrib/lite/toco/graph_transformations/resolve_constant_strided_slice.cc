@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 #include <vector>
 
+#include "tensorflow/contrib/lite/kernels/internal/strided_slice_logic.h"
 #include "tensorflow/contrib/lite/toco/graph_transformations/graph_transformations.h"
 #include "tensorflow/contrib/lite/toco/model.h"
 #include "tensorflow/contrib/lite/toco/tooling_util.h"
@@ -22,40 +23,6 @@ limitations under the License.
 namespace toco {
 
 namespace {
-
-int StartForAxis(StridedSliceOperator const& op, Shape const& input_shape,
-                 int axis) {
-  int start;
-  if (op.begin_mask & 1 << axis) {
-    // If begin mask bit is set, use the first element
-    start = 0;
-  } else {
-    // Otherwise, use the specified element
-    start = op.start_indices[axis];
-    if (start < 0) {
-      // Handle negative indices
-      start += input_shape.dims(axis);
-    }
-  }
-  return start;
-}
-
-int StopForAxis(StridedSliceOperator const& op, Shape const& input_shape,
-                int axis) {
-  int stop;
-  if (op.end_mask & (1 << axis)) {
-    // If end mask bit set, use the last element
-    stop = input_shape.dims(axis);
-  } else {
-    // Otherwise, use the specified element
-    stop = op.stop_indices[axis];
-    if (stop < 0) {
-      // Handle negative indices
-      stop += input_shape.dims(axis);
-    }
-  }
-  return stop;
-}
 
 template <ArrayDataType Type>
 void StridedSlice(StridedSliceOperator const& op, Array const& input_array,
@@ -71,11 +38,9 @@ void StridedSlice(StridedSliceOperator const& op, Array const& input_array,
   CHECK_EQ(op.new_axis_mask, 0);
 
   int num_input_axes = op.start_indices.size();
+  CHECK_EQ(num_input_axes, op.start_indices.size());
   CHECK_EQ(num_input_axes, op.stop_indices.size());
   CHECK_EQ(num_input_axes, op.strides.size());
-  for (int i = 0; i < op.strides.size(); i++) {
-    CHECK_GE(op.strides[i], 0) << "Negative strides usupported";
-  }
 
   // Create a buffer for the output array
   std::vector<DataType<Type>>& output_data =
@@ -85,9 +50,20 @@ void StridedSlice(StridedSliceOperator const& op, Array const& input_array,
   // Initialize source coordinate
   Shape const& input_shape = input_array.shape();
   Buffer<Type> const& input_buffer = input_array.GetBuffer<Type>();
-  std::vector<int> src_coord(op.start_indices.size());
+  std::vector<int> src_coord(num_input_axes);
+  std::vector<int> stop_for_axis(num_input_axes);
+  const auto strided_slice_params =
+      tflite::strided_slice::BuildStridedSliceParams(
+          op.begin_mask, op.end_mask, op.shrink_axis_mask, op.start_indices,
+          op.stop_indices, op.strides);
+
   for (int axis = 0; axis < num_input_axes; axis++) {
-    src_coord[axis] = StartForAxis(op, input_shape, axis);
+    int start_index = tflite::strided_slice::StartForAxis(
+        strided_slice_params, ToRuntimeShape(input_array.shape()), axis);
+    src_coord[axis] = start_index;
+    stop_for_axis[axis] = tflite::strided_slice::StopForAxis(
+        strided_slice_params, ToRuntimeShape(input_array.shape()), axis,
+        start_index);
   }
 
   // In order to handle any number (N) of dimensions, we copy elements one by
@@ -103,15 +79,18 @@ void StridedSlice(StridedSliceOperator const& op, Array const& input_array,
     // Compute next source input coordinates.
     bool carry = true;
     for (int axis = 0; axis < num_input_axes; axis++) {
+      int stride = op.strides[axis];
       // Increment this axis if we carried from the previous one
       if (carry) {
-        src_coord[axis] += op.strides[axis];
+        src_coord[axis] += stride;
       }
 
       // Check if we've overflowed.
-      if (src_coord[axis] >= StopForAxis(op, input_shape, axis)) {
+      int stop = stop_for_axis[axis];
+      if (tflite::strided_slice::LoopCondition(src_coord[axis], stop, stride)) {
         // Reset axis and set carry
-        src_coord[axis] = StartForAxis(op, input_shape, axis);
+        src_coord[axis] = tflite::strided_slice::StartForAxis(
+            strided_slice_params, ToRuntimeShape(input_shape), axis);
         carry = true;
       } else {
         carry = false;
@@ -124,11 +103,14 @@ void StridedSlice(StridedSliceOperator const& op, Array const& input_array,
 
 }  // anonymous namespace
 
-bool ResolveConstantStridedSlice::Run(Model* model, std::size_t op_index) {
+::tensorflow::Status ResolveConstantStridedSlice::Run(Model* model,
+                                                      std::size_t op_index,
+                                                      bool* modified) {
+  *modified = false;
   const auto it = model->operators.begin() + op_index;
   const auto* base_op = it->get();
   if (base_op->type != OperatorType::kStridedSlice) {
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   const StridedSliceOperator* op =
@@ -138,28 +120,28 @@ bool ResolveConstantStridedSlice::Run(Model* model, std::size_t op_index) {
   auto& output_array = model->GetArray(op->outputs[0]);
   if (output_array.data_type == ArrayDataType::kNone) {
     // Yield until the output type has been set by PropagateArrayDataTypes
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   if (!output_array.has_shape()) {
     // Yield until the output shape has been set by PropagateFixedShapes
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   if (op->start_indices.empty() || op->stop_indices.empty() ||
       op->strides.empty()) {
     // Attributes have not resolved yet.
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   const auto& input_array = model->GetArray(op->inputs[0]);
   if (!input_array.has_shape()) {
     // Yield until the value shape has been resolved.
-    return false;
+    return ::tensorflow::Status::OK();
   }
   if (!IsConstantParameterArray(*model, op->inputs[0])) {
     // Yield until the value is constant.
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   CHECK(!output_array.buffer);
@@ -183,16 +165,10 @@ bool ResolveConstantStridedSlice::Run(Model* model, std::size_t op_index) {
       break;
   }
 
-  // Erase input array if no longer used
-  if (IsDiscardableArray(*model, op->inputs[0]) &&
-      CountOpsWithInput(*model, op->inputs[0]) == 1) {
-    model->arrays.erase(op->inputs[0]);
-  }
+  DeleteOpAndArraysIfUnused(model, it->get());
 
-  // Erase the operator
-  model->operators.erase(it);
-
-  return true;
+  *modified = true;
+  return ::tensorflow::Status::OK();
 }
 
 }  // namespace toco

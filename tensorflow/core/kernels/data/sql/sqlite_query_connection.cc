@@ -15,10 +15,11 @@ limitations under the License.
 #include "tensorflow/core/kernels/data/sql/sqlite_query_connection.h"
 
 #include "tensorflow/core/framework/register_types.h"
+#include "tensorflow/core/kernels/data/dataset.h"
 #include "tensorflow/core/lib/strings/stringprintf.h"
 
 namespace tensorflow {
-
+namespace data {
 namespace sql {
 
 SqliteQueryConnection::SqliteQueryConnection() {}
@@ -48,14 +49,16 @@ Status SqliteQueryConnection::Close() {
   return Status::OK();
 }
 
-Status SqliteQueryConnection::GetNext(std::vector<Tensor>* out_tensors,
+Status SqliteQueryConnection::GetNext(IteratorContext* ctx,
+                                      std::vector<Tensor>* out_tensors,
                                       bool* end_of_sequence) {
   if (!stmt_) TF_RETURN_IF_ERROR(PrepareQuery());
   TF_RETURN_IF_ERROR(stmt_.Step(end_of_sequence));
   if (!*end_of_sequence) {
     for (int i = 0; i < column_count_; i++) {
       DataType dt = output_types_[i];
-      Tensor tensor(cpu_allocator(), dt, {});
+      // TODO(mrry): Pass in the `IteratorContext::allocator()`.
+      Tensor tensor(ctx->allocator({}), dt, {});
       FillTensorWithResultSetEntry(dt, i, &tensor);
       out_tensors->emplace_back(std::move(tensor));
     }
@@ -112,5 +115,5 @@ void SqliteQueryConnection::FillTensorWithResultSetEntry(
 }
 
 }  // namespace sql
-
+}  // namespace data
 }  // namespace tensorflow

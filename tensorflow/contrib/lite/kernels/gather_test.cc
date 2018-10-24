@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 #include <gtest/gtest.h>
-#include "tensorflow/contrib/lite/builtin_op_data.h"
+#include "tensorflow/contrib/lite/c/builtin_op_data.h"
 #include "tensorflow/contrib/lite/interpreter.h"
 #include "tensorflow/contrib/lite/kernels/register.h"
 #include "tensorflow/contrib/lite/kernels/test_util.h"
@@ -48,8 +48,8 @@ class GatherOpModel : public SingleOpModel {
     PopulateStringTensor(input_, data);
   }
 
-  void SetPositions(std::initializer_list<int32> data) {
-    PopulateTensor<int32>(positions_, data);
+  void SetPositions(std::initializer_list<int> data) {
+    PopulateTensor<int>(positions_, data);
   }
 
   std::vector<float> GetOutputFloat() { return ExtractVector<float>(output_); }
@@ -74,6 +74,35 @@ TEST(GatherOpTest, Shuffle) {
   m.Invoke();
   EXPECT_THAT(m.GetOutputFloat(),
               ElementsAreArray(ArrayFloatNear({0.7, 0.8, -2, 0.2})));
+}
+
+TEST(GatherOpTest, Test0DIndex) {
+  GatherOpModel m({2, 2}, TensorType_FLOAT32, {});
+  m.SetInputFloat({-2.0, 0.2, 0.7, 0.8});
+  m.SetPositions({1});
+  m.Invoke();
+  EXPECT_THAT(m.GetOutputFloat(), ElementsAreArray(ArrayFloatNear({0.7, 0.8})));
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({2}));
+}
+
+TEST(GatherOpTest, Test0DIndexWith0DResult) {
+  // 0D tensor is special case in current TFLite. Test it once to make sure
+  // existing workarounds are fine with it.
+  GatherOpModel m({3}, TensorType_FLOAT32, {});
+  m.SetInputFloat({1.0, 2.0, 3.0});
+  m.SetPositions({1});
+  m.Invoke();
+  EXPECT_THAT(m.GetOutputFloat(), ElementsAreArray(ArrayFloatNear({2.0})));
+  EXPECT_TRUE(m.GetOutputShape().empty());
+}
+
+TEST(GatherOpTest, Test2DIndexWith2DResult) {
+  GatherOpModel m({3}, TensorType_FLOAT32, {1, 2});
+  m.SetInputFloat({1.0, 2.0, 3.0});
+  m.SetPositions({1, 0});
+  m.Invoke();
+  EXPECT_THAT(m.GetOutputFloat(), ElementsAreArray(ArrayFloatNear({2.0, 1.0})));
+  EXPECT_THAT(m.GetOutputShape(), ElementsAreArray({1, 2}));
 }
 
 TEST(FloatGatherOpTest, Duplicate) {

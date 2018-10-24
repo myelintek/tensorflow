@@ -16,23 +16,26 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/tf2xla_util.h"
 
 #include <queue>
+#include <random>
 #include <set>
 #include <unordered_map>
 
+#include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/tf2xla/sharding_util.h"
 #include "tensorflow/compiler/tf2xla/tf2xla.pb.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
+#include "tensorflow/core/common_runtime/function.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/graph_def_util.h"
+#include "tensorflow/core/framework/graph_to_functiondef.h"
 #include "tensorflow/core/framework/node_def.pb.h"
+#include "tensorflow/core/framework/node_def_builder.h"
 #include "tensorflow/core/framework/tensor_shape.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/framework/versions.pb.h"
 #include "tensorflow/core/graph/tensor_id.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/gtl/optional.h"
-#include "tensorflow/core/lib/strings/strcat.h"
 
 namespace tensorflow {
 
@@ -74,6 +77,8 @@ Status CheckFeedFetchNameConflicts(const string& kind,
 
 }  // namespace
 
+const char kXlaOutsideCompilationAttrName[] = "_xla_outside_compilation";
+
 Status ValidateConfig(const tf2xla::Config& config) {
   std::set<string> names;
   for (const tf2xla::Feed& feed : config.feed()) {
@@ -111,8 +116,8 @@ Status AddPlaceholdersForFeeds(
     const string name_port = TensorIdToString(feed->id());
     PlaceholderInfo& info = placeholder_info[name_port];
     info.feed = feed;
-    info.placeholder_name = strings::StrCat(
-        "aot_feed_", feed->id().output_index(), "/", feed->id().node_name());
+    info.placeholder_name = absl::StrCat("aot_feed_", feed->id().output_index(),
+                                         "/", feed->id().node_name());
     (*feed_remapping)[name_port] = info.placeholder_name;
   }
 
@@ -151,8 +156,15 @@ Status AddPlaceholdersForFeeds(
       Status status;
       Node* feed_node = g.AddNode(gd.node(0), &status);
       TF_RETURN_IF_ERROR(status);
-      info.data_type =
-          BaseType(feed_node->output_type(info.feed->id().output_index()));
+
+      if (info.feed->id().output_index() < feed_node->num_outputs()) {
+        info.data_type =
+            BaseType(feed_node->output_type(info.feed->id().output_index()));
+      } else {
+        return errors::InvalidArgument(
+            "Invalid output_index ", info.feed->id().output_index(),
+            " for feed node ", info.feed->id().node_name());
+      }
     }
   }
 
@@ -225,7 +237,7 @@ Status PruneGraphDefInto(const tf2xla::Config& config, const GraphDef& in,
     // Push input nodes of the currently visited node to name_queue.
     for (const string& in_edge : map_entry.second->input()) {
       auto id = ParseTensorName(in_edge);
-      const string node_name = id.first.ToString();
+      const string node_name = string(id.first);
       if (feed_tensors.find(std::make_pair(node_name, id.second)) ==
           feed_tensors.end()) {
         name_queue.push(node_name);
@@ -250,7 +262,7 @@ Status PruneGraphDefInto(const tf2xla::Config& config, const GraphDef& in,
 }
 
 string TensorIdToString(const tf2xla::TensorId& id) {
-  return strings::StrCat(id.node_name(), ":", id.output_index());
+  return absl::StrCat(id.node_name(), ":", id.output_index());
 }
 
 Status SetNodeShardingFromNeighbors(Node* n, bool out_edges) {
@@ -260,7 +272,7 @@ Status SetNodeShardingFromNeighbors(Node* n, bool out_edges) {
     if (edge->IsControlEdge()) continue;
     const Node* possible_match = out_edges ? edge->dst() : edge->src();
     TF_ASSIGN_OR_RETURN(
-        tensorflow::gtl::optional<xla::OpSharding> sharding,
+        absl::optional<xla::OpSharding> sharding,
         ParseShardingFromDevice(
             *possible_match,
             /*num_cores_per_replica=*/std::numeric_limits<int32>::max()));
@@ -279,6 +291,233 @@ Status SetNodeShardingFromNeighbors(Node* n, bool out_edges) {
     n->set_requested_device(matching_node->requested_device());
   }
   return Status::OK();
+}
+
+void AddDtypeToKernelDefConstraint(absl::string_view name, DataType dtype,
+                                   KernelDef* kdef) {
+  for (KernelDef::AttrConstraint& constraint : *kdef->mutable_constraint()) {
+    if (constraint.name() == name) {
+      constraint.mutable_allowed_values()->mutable_list()->add_type(dtype);
+    }
+  }
+}
+
+namespace {
+uint32 InitialRandomSeed() {
+  // Support plumbing the TF seed through to XLA is being worked on.
+  // If a user wants deterministic behavior, their best option
+  // is to start with a known checkpoint. This also handles issues when
+  // multiple random calls can be invoked in any order by TF executor.
+  // Another option is to use stateless random ops. They have much cleaner
+  // semantics.
+  // If a user really wants to set a deterministic seed for XLA-based
+  // devices, this is the place to do it.
+  std::random_device rd;
+  // Make the starting value odd.
+  return rd() | 1;
+}
+}  // namespace
+
+uint32 GetXLARandomSeed() {
+  // We initialize counter with an odd number and increment it by two
+  // everytime. This ensures that it will never be zero, even
+  // after an overflow. When seeded with zero, some XLA backends
+  // can return all zeros instead of random numbers.
+  static std::atomic<uint32> counter(InitialRandomSeed());
+  return counter.fetch_add(2);
+}
+
+// TODO(b/77601805): add tests for associated function related stuff.
+bool HasAssociatedFunction(const NodeDef& node_def,
+                           const FunctionLibraryDefinition* fld) {
+  if (fld->Contains(node_def.op())) {
+    return true;
+  }
+
+  if (node_def.op() == FunctionLibraryDefinition::kGradientOp) {
+    // Gradient op has "f" attr, which is set to the function we are getting
+    // gradient for. We need to functionalize the gradient function.
+    return true;
+  }
+
+  for (const auto& iter : node_def.attr()) {
+    if (iter.second.has_func()) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+std::vector<AssociatedFunctionInfo> GetAssociatedFunctions(
+    const Node& node, const FunctionLibraryDefinition* fld) {
+  std::vector<AssociatedFunctionInfo> results;
+  const string& op = node.type_string();
+  if (fld->Contains(op)) {
+    // This is a function call node.
+    AttrValueMap attrs(node.attrs().begin(), node.attrs().end());
+    results.emplace_back(AssociatedFunctionInfo::FunctionCall(op, attrs));
+  } else if (node.type_string() == FunctionLibraryDefinition::kGradientOp) {
+    // This is a SymbolicGradient op.
+    AttrValueMap attrs(node.attrs().begin(), node.attrs().end());
+    results.emplace_back(AssociatedFunctionInfo::SymbolicGradient(op, attrs));
+  } else {
+    // Collect all function attrs for the node.
+    for (auto& iter : node.attrs()) {
+      if (iter.second.has_func()) {
+        VLOG(2) << "Found function attr for node " << node.name() << ": "
+                << iter.first << " = " << iter.second.func().name();
+        results.emplace_back(AssociatedFunctionInfo::FunctionAttr(
+            iter.second.func().name(), iter.second.func().attr(), iter.first));
+      }
+    }
+  }
+  return results;
+}
+
+Status RewriteAssociatedFunction(
+    Graph* graph, Node* node, FunctionLibraryDefinition* fld,
+    const AssociatedFunctionInfo& associated_function,
+    const string& rewritten_function_name) {
+  switch (associated_function.type()) {
+    case AssociatedFunctionInfo::kFunctionCallNode: {
+      // Change this node to call the new function.
+      NodeDefBuilder builder(node->name(), rewritten_function_name, fld);
+      for (auto attr : node->attrs()) {
+        builder.Attr(attr.first, attr.second);
+      }
+      for (int i = 0; i < node->num_inputs(); i++) {
+        Node* input_node;
+        TF_RETURN_IF_ERROR(node->input_node(i, &input_node));
+        builder.Input(input_node->name(), i, node->input_type(i));
+      }
+      builder.Device(node->assigned_device_name().empty()
+                         ? node->requested_device()
+                         : node->assigned_device_name());
+      NodeDef node_def;
+      TF_RETURN_IF_ERROR(builder.Finalize(&node_def));
+      Status s;
+      Node* new_node = graph->AddNode(node_def, &s);
+      TF_RETURN_IF_ERROR(s);
+      for (auto edge : node->in_edges()) {
+        graph->AddEdge(edge->src(), edge->src_output(), new_node,
+                       edge->dst_input());
+      }
+      for (auto edge : node->out_edges()) {
+        graph->AddEdge(new_node, edge->src_output(), edge->dst(),
+                       edge->dst_input());
+      }
+      graph->RemoveNode(node);
+      break;
+    }
+    case AssociatedFunctionInfo::kSymbolicGradient: {
+      NameAttrList func;
+      TF_RETURN_IF_ERROR(GetNodeAttr(
+          node->attrs(), FunctionLibraryDefinition::kFuncAttr, &func));
+      GradientDef gradient_def;
+      gradient_def.set_function_name(func.name());
+      gradient_def.set_gradient_func(rewritten_function_name);
+      string original_grad_func = fld->FindGradient(func.name());
+      if (original_grad_func.empty()) {
+        TF_RETURN_IF_ERROR(fld->AddGradientDef(gradient_def));
+      } else if (original_grad_func != rewritten_function_name) {
+        TF_RETURN_IF_ERROR(fld->ReplaceGradient(gradient_def));
+      }
+      break;
+    }
+    case AssociatedFunctionInfo::kFunctionAttr: {
+      // Change function attr to rewritten functions.
+      NameAttrList func;
+      TF_RETURN_IF_ERROR(
+          GetNodeAttr(node->attrs(), associated_function.attr_name(), &func));
+      node->ClearAttr(associated_function.attr_name());
+      func.set_name(rewritten_function_name);
+      node->AddAttr(associated_function.attr_name(), func);
+      break;
+    }
+  }
+
+  return Status::OK();
+}
+
+Status CachedFunctionHandles::GetOrInstantiate(
+    const string& func_name, AttrSlice attrs,
+    FunctionLibraryRuntime::Handle* handle) {
+  string canonicalized_name = Canonicalize(func_name, attrs);
+  auto iter = handles_.find(canonicalized_name);
+  if (iter != handles_.end()) {
+    *handle = iter->second;
+    return Status::OK();
+  }
+
+  TF_RETURN_IF_ERROR(flr_->Instantiate(func_name, attrs, handle));
+  handles_[canonicalized_name] = *handle;
+  return Status::OK();
+}
+
+Status CachedFunctionHandles::ReleaseAllHandles() {
+  Status result;
+  for (auto iter : handles_) {
+    result.Update(flr_->ReleaseHandle(iter.second));
+  }
+  handles_.clear();
+  return result;
+}
+
+xla::StatusOr<Node*> ReplaceNode(Graph* g, Node* n, const NodeDef& node_def) {
+  // Create the replacement node.
+  Status s;
+  Node* new_node = g->AddNode(node_def, &s);
+  if (!s.ok()) {
+    return s;
+  }
+
+  // Record original node's output edges and remove them first. This is to avoid
+  // multiple producers for dst nodes' input.
+  std::vector<OutEdgeInfo> out_edge_info;
+  std::vector<const Edge*> out_edges;
+  for (const Edge* edge : n->out_edges()) {
+    out_edges.push_back(edge);
+    out_edge_info.push_back(
+        {edge->dst(), edge->src_output(), edge->dst_input()});
+  }
+  for (const Edge* edge : out_edges) {
+    g->RemoveEdge(edge);
+  }
+
+  // Add original node's input and output edges to the replacement node.
+  for (const Edge* in_edge : n->in_edges()) {
+    g->AddEdge(in_edge->src(), in_edge->src_output(), new_node,
+               in_edge->dst_input());
+  }
+  for (const OutEdgeInfo& out_edge : out_edge_info) {
+    g->AddEdge(new_node, out_edge.src_output, out_edge.dst, out_edge.dst_input);
+  }
+
+  // Remove the original node.
+  g->RemoveNode(n);
+
+  return new_node;
+}
+
+xla::StatusOr<Node*> BuildIdentityNode(
+    Graph* graph, const string& node_name, DataType dtype, const Node* input,
+    absl::optional<string> requested_device) {
+  // Create identity node.
+  NodeDef ndef;
+  ndef.set_name(node_name);
+  ndef.set_op("Identity");
+  if (input) {
+    ndef.add_input(input->name());
+  }
+  if (requested_device) {
+    ndef.set_device(*requested_device);
+  }
+  AddNodeAttr("T", dtype, &ndef);
+  Status s;
+  Node* id_node = graph->AddNode(ndef, &s);
+  TF_RETURN_IF_ERROR(s);
+  return id_node;
 }
 
 }  // namespace tensorflow

@@ -15,24 +15,24 @@ limitations under the License.
 
 #include "tensorflow/core/grappler/costs/virtual_scheduler.h"
 #include "tensorflow/cc/ops/standard_ops.h"
+#include "tensorflow/core/framework/tensor.pb.h"  // NOLINT
 #include "tensorflow/core/framework/tensor_description.pb.h"
 #include "tensorflow/core/framework/tensor_shape.pb.h"
 #include "tensorflow/core/grappler/clusters/virtual_cluster.h"
+#include "tensorflow/core/grappler/costs/utils.h"
 #include "tensorflow/core/grappler/costs/virtual_placer.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/test.h"
 
 namespace tensorflow {
 namespace grappler {
+
 // Class for testing virtual scheduler.
 class TestVirtualScheduler : public VirtualScheduler {
  public:
-  TestVirtualScheduler(const GrapplerItem* grappler_item,
-                       const bool use_static_shapes, Cluster* cluster)
-      : VirtualScheduler(grappler_item, use_static_shapes, cluster,
-                         &ready_node_manager_) {}
+  TestVirtualScheduler(const bool use_static_shapes, Cluster* cluster)
+      : VirtualScheduler(use_static_shapes, cluster, &ready_node_manager_) {}
 
-  FRIEND_TEST(VirtualSchedulerTest, CalculateOutputSize);
   FRIEND_TEST(VirtualSchedulerTest, MemoryUsage);
   FRIEND_TEST(VirtualSchedulerTest, ControlDependency);
   FRIEND_TEST(VirtualSchedulerTest, ComplexDependency);
@@ -45,6 +45,30 @@ class TestVirtualScheduler : public VirtualScheduler {
 
 class VirtualSchedulerTest : public ::testing::Test {
  protected:
+  VirtualSchedulerTest() {
+    // node1_ to node6_ on kCPU0, with time_ready in reverse_order.
+    NodeSetUp("Node1", kConv2D, kCPU0, 6000, &node1_);
+    NodeSetUp("Node2", kConv2D, kCPU0, 5000, &node2_);
+    NodeSetUp("Node3", kConv2D, kCPU0, 4000, &node3_);
+    NodeSetUp("Node4", kConv2D, kCPU0, 3000, &node4_);
+    NodeSetUp("Node5", kConv2D, kCPU0, 2000, &node5_);
+    NodeSetUp("Node6", kConv2D, kCPU0, 1000, &node6_);
+
+    // Initializes cluster_ and scheduler_.
+    std::unordered_map<string, DeviceProperties> devices;
+
+    // Set some dummy CPU properties
+    DeviceProperties cpu_device = GetDummyCPUDevice();
+
+    // IMPORTANT: Device is not actually ever used in the test case since
+    // force_cpu_type is defaulted to "Haswell"
+    devices[kCPU0] = cpu_device;
+    devices[kCPU1] = cpu_device;
+    cluster_ = absl::make_unique<VirtualCluster>(devices);
+    scheduler_ = absl::make_unique<TestVirtualScheduler>(
+        /* use_static_shapes = */ true, cluster_.get());
+  }
+
   NodeDef node1_, node2_, node3_, node4_, node5_, node6_;
   std::unordered_map<const NodeDef*, NodeState> node_states_;
 
@@ -80,29 +104,6 @@ class VirtualSchedulerTest : public ::testing::Test {
     node_states_[node] = NodeState();
     node_states_[node].time_ready = time_ready;
     node_states_[node].device_name = device_name;
-  }
-
-  void SetUp() override {
-    // node1_ to node6_ on kCPU0, with time_ready in reverse_order.
-    NodeSetUp("Node1", kConv2D, kCPU0, 6000, &node1_);
-    NodeSetUp("Node2", kConv2D, kCPU0, 5000, &node2_);
-    NodeSetUp("Node3", kConv2D, kCPU0, 4000, &node3_);
-    NodeSetUp("Node4", kConv2D, kCPU0, 3000, &node4_);
-    NodeSetUp("Node5", kConv2D, kCPU0, 2000, &node5_);
-    NodeSetUp("Node6", kConv2D, kCPU0, 1000, &node6_);
-
-    // Initializes cluster_ and placer_.
-    std::unordered_map<string, DeviceProperties> devices;
-
-    // Set some dummy CPU properties
-    DeviceProperties cpu_device = GetDummyCPUDevice();
-
-    // IMPORTANT: Device is not actually ever used in the test case since
-    // force_cpu_type is defaulted to "Haswell"
-    devices[kCPU0] = cpu_device;
-    devices[kCPU1] = cpu_device;
-    cluster_.reset(new VirtualCluster(devices));
-    placer_.reset(new VirtualPlacer(cluster_.get()));
   }
 
   // Three Conv2Ds with only two in fetch nodes.
@@ -203,6 +204,25 @@ class VirtualSchedulerTest : public ::testing::Test {
     grappler_item_->fetch = {"out"};
 
     dependency_["out"] = {"x", "y", "z", "w"};
+  }
+
+  // Graph with some placeholder feed nodes that are not in the fetch fan-in.
+  void CreateGrapplerItemWithUnnecessaryPlaceholderNodes() {
+    Scope s = Scope::NewRootScope().WithDevice(kCPU0);
+    auto unnecessary = ops::Placeholder(s.WithOpName("unnecessary"), DT_FLOAT);
+    auto x = ops::Placeholder(s.WithOpName("x"), DT_FLOAT);
+
+    GraphDef def;
+    TF_CHECK_OK(s.ToGraphDef(&def));
+
+    grappler_item_.reset(new GrapplerItem);
+    grappler_item_->id = "test_extra_placeholders";
+    grappler_item_->graph = def;
+    grappler_item_->fetch = {"x"};
+
+    // Grappler Item Builder puts all placeholder nodes into the feed
+    // list by default.
+    grappler_item_->feed = {{"x", Tensor()}, {"unnecessary", Tensor()}};
   }
 
   // NoOp that takes 7 NoOps as control dependency.
@@ -339,6 +359,63 @@ node {
     }
   }
 }
+node {
+  name: "Recv"
+  op: "_Recv"
+  device: "/job:localhost/replica:0/task:0/device:CPU:0"
+  attr {
+    key: "client_terminated"
+    value {
+      b: false
+    }
+  }
+  attr {
+    key: "recv_device"
+    value {
+      s: "/job:localhost/replica:0/task:0/device:CPU:0"
+    }
+  }
+  attr {
+    key: "send_device"
+    value {
+      s: "/job:localhost/replica:0/task:0/device:CPU:0"
+    }
+  }
+  attr {
+    key: "send_device_incarnation"
+    value {
+      i: 0
+    }
+  }
+  attr {
+    key: "tensor_name"
+    value {
+      s: "test"
+    }
+  }
+  attr {
+    key: "tensor_type"
+    value {
+      type: DT_FLOAT
+    }
+  }
+}
+library {
+}
+versions {
+  producer: 24
+}
+    )EOF";
+
+    grappler_item_.reset(new GrapplerItem);
+    CHECK(protobuf::TextFormat::ParseFromString(gdef_ascii,
+                                                &grappler_item_->graph));
+    grappler_item_->id = "test_graph";
+    grappler_item_->fetch = {"Recv"};
+  }
+
+  void CreateGrapplerItemWithRecvWithoutSend() {
+    const string gdef_ascii = R"EOF(
 node {
   name: "Recv"
   op: "_Recv"
@@ -841,11 +918,7 @@ versions {
   }
 
   // Call this after creating grappler_item_ and setting up dependency_.
-  void InitScheduler() {
-    scheduler_.reset(new TestVirtualScheduler(
-        grappler_item_.get(), true /* use_static_shapes */, cluster_.get()));
-    TF_CHECK_OK(scheduler_->Init());
-  }
+  void InitScheduler() { TF_ASSERT_OK(scheduler_->Init(grappler_item_.get())); }
 
   // Returns cost based on op.
   Costs SimplePredictCosts(const OpContext& op_context) const {
@@ -866,7 +939,6 @@ versions {
   // target_node.
   std::unordered_map<string, OpContext> RunScheduler(
       const string& target_node) {
-    Costs zero_costs = Costs::ZeroCosts();
     std::unordered_map<string, OpContext> ops_executed;
     bool more_nodes = true;
     do {
@@ -958,25 +1030,12 @@ versions {
     }
   }
 
-  // Helper method for converting shape vector to TensorProperty.
-  OpInfo::TensorProperties ShapeToTensorProperty(
-      const std::vector<int> shape, const DataType& data_type) const {
-    OpInfo::TensorProperties tensor_property;
-    tensor_property.set_dtype(data_type);
-    for (const auto& x : shape) {
-      tensor_property.mutable_shape()->add_dim()->set_size(x);
-    }
-    return tensor_property;
-  }
-
-  // SetUp() inits cluster_ and placer_.
+  // cluster_ and scheduler_ are initialized in the c'tor.
   std::unique_ptr<VirtualCluster> cluster_;
-  std::unique_ptr<VirtualPlacer> placer_;
-
-  // grappler_item_ and scheduler_ will be initialized differently for each test
-  // case.
-  std::unique_ptr<GrapplerItem> grappler_item_;
   std::unique_ptr<TestVirtualScheduler> scheduler_;
+
+  // grappler_item_ will be initialized differently for each test case.
+  std::unique_ptr<GrapplerItem> grappler_item_;
   // Node name -> its preceding nodes map for testing scheduling order.
   std::unordered_map<string, std::vector<string>> dependency_;
 
@@ -1556,6 +1615,9 @@ TEST_F(VirtualSchedulerTest, SummaryCostTest) {
   // Misc - 5 * 1us
   // Total: 13000005
   EXPECT_EQ(13000005, c.execution_time.asMicroSeconds().count());
+  EXPECT_EQ(grappler_item_->graph.node_size(), c.num_ops_total);
+  EXPECT_FALSE(c.inaccurate);
+  EXPECT_EQ(0, c.num_ops_with_unknown_shapes);
 }
 
 // Like the above SummaryCostTest, but makes sure the stepstats timeline is
@@ -1569,6 +1631,9 @@ TEST_F(VirtualSchedulerTest, SummaryCostStepStatsTest) {
   Costs c = scheduler_->Summary(&metadata);
   StepStats stepstats = metadata.step_stats();
   EXPECT_EQ(13000005, c.execution_time.asMicroSeconds().count());
+  EXPECT_EQ(grappler_item_->graph.node_size(), c.num_ops_total);
+  EXPECT_FALSE(c.inaccurate);
+  EXPECT_EQ(0, c.num_ops_with_unknown_shapes);
 
   // Should only be 1 device!
   EXPECT_EQ(1, stepstats.dev_stats().size());
@@ -1647,38 +1712,6 @@ TEST_F(VirtualSchedulerTest, InitAndBasicScheduling) {
   EXPECT_EQ(2, ops_executed["c1"].op_info.inputs_size());
 }
 
-TEST_F(VirtualSchedulerTest, CalculateOutputSize) {
-  // Init.
-  CreateGrapplerItemWithAddN();
-  InitScheduler();
-
-  // Create a set of tensor properties.
-  std::vector<OpInfo::TensorProperties> output;
-  output.push_back(ShapeToTensorProperty({4, 4}, DT_FLOAT));           // 0
-  output.push_back(ShapeToTensorProperty({1}, DT_FLOAT));              // 1
-  output.push_back(ShapeToTensorProperty({10, 10, 10}, DT_HALF));      // 2
-  output.push_back(ShapeToTensorProperty({100, 7, 8, 99}, DT_FLOAT));  // 3
-  output.push_back(ShapeToTensorProperty({-1, 7, 8, 99}, DT_FLOAT));   // 4
-  output.push_back(ShapeToTensorProperty({-1, 7, -1, 99}, DT_FLOAT));  // 4
-
-  // port_num -1 is for control dependency: hard coded 4B.
-  EXPECT_EQ(4, scheduler_->CalculateOutputSize(output, -1));
-
-  // Test valid outputs.
-  EXPECT_EQ(4 * 4 * 4, scheduler_->CalculateOutputSize(output, 0));
-  EXPECT_EQ(4 * 1, scheduler_->CalculateOutputSize(output, 1));
-  EXPECT_EQ(2 * 10 * 10 * 10, scheduler_->CalculateOutputSize(output, 2));
-  EXPECT_EQ(4 * 100 * 7 * 8 * 99, scheduler_->CalculateOutputSize(output, 3));
-
-  // Any unknown shape (-1) shall yield zero output size.
-  EXPECT_EQ(0, scheduler_->CalculateOutputSize(output, 4));
-  EXPECT_EQ(0, scheduler_->CalculateOutputSize(output, 5));
-
-  // Invalid port_num (though it may be an error) shall yield zero
-  // output size.
-  EXPECT_EQ(0, scheduler_->CalculateOutputSize(output, 6));
-}
-
 TEST_F(VirtualSchedulerTest, MemoryUsage) {
   // Init.
   CreateGrapplerItemWithAddN();
@@ -1698,6 +1731,16 @@ TEST_F(VirtualSchedulerTest, MemoryUsage) {
             cpu_state.max_memory_usage);
   ValidateMemoryUsageSnapshot(expected_names, 0 /* port_num_expected */,
                               cpu_state.mem_usage_snapshot_at_peak);
+}
+
+TEST_F(VirtualSchedulerTest, UnnecessaryFeedNodes) {
+  CreateGrapplerItemWithUnnecessaryPlaceholderNodes();
+  InitScheduler();
+
+  // Test that scheduler can run graphs with extra unnecessary feed nodes.
+  auto ops_executed = RunScheduler("");
+  ASSERT_EQ(1, ops_executed.size());
+  ASSERT_EQ(ops_executed.count("x"), 1);
 }
 
 TEST_F(VirtualSchedulerTest, ControlDependency) {
@@ -1907,13 +1950,13 @@ TEST_F(VirtualSchedulerTest, InterDeviceTransfer) {
 
   // Helper lambda to extract port num from _Send and _Recv op name.
   auto get_port_num = [](const string& name) -> int {
-    if (name.find("bn_0") != std::string::npos) {
+    if (name.find("bn_0") != string::npos) {
       return 0;
-    } else if (name.find("bn_1") != std::string::npos) {
+    } else if (name.find("bn_1") != string::npos) {
       return 1;
-    } else if (name.find("bn_2") != std::string::npos) {
+    } else if (name.find("bn_2") != string::npos) {
       return 2;
-    } else if (name.find("bn_minus1") != std::string::npos) {
+    } else if (name.find("bn_minus1") != string::npos) {
       return -1;
     }
     return -999;
@@ -1949,7 +1992,7 @@ TEST_F(VirtualSchedulerTest, InterDeviceTransfer) {
     for (const auto& output_property : output_properties_) {
       output_properties.push_back(output_property);
     }
-    return scheduler_->CalculateOutputSize(output_properties, 0);
+    return CalculateOutputSize(output_properties, 0);
   };
 
   // Validate transfer size.
@@ -2015,5 +2058,18 @@ TEST_F(VirtualSchedulerTest, GraphWithSendRecvDifferentDevice) {
             0);
   EXPECT_GT(ops_executed.count("Recv"), 0);
 }
+
+TEST_F(VirtualSchedulerTest, GraphWihtOnlyRecv) {
+  // Init.
+  CreateGrapplerItemWithRecvWithoutSend();
+  InitScheduler();
+
+  // Run the scheduler.
+  auto ops_executed = RunScheduler("");
+
+  // Recv without Send will be treated as initially ready node.
+  EXPECT_GT(ops_executed.count("Recv"), 0);
+}
+
 }  // end namespace grappler
 }  // end namespace tensorflow

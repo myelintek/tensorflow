@@ -19,36 +19,38 @@ limitations under the License.
 
 namespace toco {
 
-bool ResolveConstantShapeOrRank::Run(Model* model, std::size_t op_index) {
+::tensorflow::Status ResolveConstantShapeOrRank::Run(Model* model,
+                                                     std::size_t op_index,
+                                                     bool* modified) {
+  *modified = false;
   const auto it = model->operators.begin() + op_index;
   const auto* op = it->get();
-  if (!(op->type == OperatorType::kTensorFlowShape ||
-        op->type == OperatorType::kRank)) {
-    return false;
+  if (!(op->type == OperatorType::kShape || op->type == OperatorType::kRank)) {
+    return ::tensorflow::Status::OK();
   }
 
   CHECK_EQ(op->outputs.size(), 1);
   auto& output_array = model->GetArray(op->outputs[0]);
   if (output_array.data_type == ArrayDataType::kNone) {
     // Yield until the output type has been resolved
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   const auto& input_array = model->GetArray(op->inputs[0]);
   if (!input_array.has_shape()) {
     // Yield until the input array's shape has been resolved.
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   if (!output_array.has_shape()) {
     // Yield until the output shape has been resolved.
-    return false;
+    return ::tensorflow::Status::OK();
   }
 
   // Compute the output
   CHECK(!output_array.buffer);
   auto& output_buffer = output_array.GetMutableBuffer<ArrayDataType::kInt32>();
-  if (op->type == OperatorType::kTensorFlowShape) {
+  if (op->type == OperatorType::kShape) {
     // Copy the input shape into the output buffer.
     output_buffer.data = input_array.shape().dims();
   } else if (op->type == OperatorType::kRank) {
@@ -62,11 +64,12 @@ bool ResolveConstantShapeOrRank::Run(Model* model, std::size_t op_index) {
   // Delete the input array if no longer used
   if (IsDiscardableArray(*model, op->inputs[0]) &&
       CountOpsWithInput(*model, op->inputs[0]) == 1) {
-    model->arrays.erase(op->inputs[0]);
+    model->EraseArray(op->inputs[0]);
   }
 
   model->operators.erase(it);
-  return true;
+  *modified = true;
+  return ::tensorflow::Status::OK();
 }
 
 }  // namespace toco

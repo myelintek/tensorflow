@@ -14,8 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include <string.h>
 #include <vector>
-#include "tensorflow/contrib/lite/builtin_op_data.h"
-#include "tensorflow/contrib/lite/context.h"
+#include "tensorflow/contrib/lite/c/builtin_op_data.h"
+#include "tensorflow/contrib/lite/c/c_api_internal.h"
 #include "tensorflow/contrib/lite/kernels/internal/reference/reference_ops.h"
 #include "tensorflow/contrib/lite/kernels/internal/tensor.h"
 #include "tensorflow/contrib/lite/kernels/kernel_util.h"
@@ -31,70 +31,80 @@ enum KernelType {
   kReference,
 };
 
-// TODO(nupurgarg): Permutation arrays represented as a tensor are ignored. Only
-// use the `perm` specified in `params`.
 struct TransposeContext {
   TransposeContext(TfLiteContext* context, TfLiteNode* node) {
-    params = reinterpret_cast<TfLiteTransposeParams*>(node->builtin_data);
     input = GetInput(context, node, 0);
+    perm = GetInput(context, node, 1);
     output = GetOutput(context, node, 0);
   }
-  TfLiteTransposeParams* params;
-  TfLiteTensor* input;
+  const TfLiteTensor* input;
+  const TfLiteTensor* perm;
   TfLiteTensor* output;
 };
 
-TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
-  TF_LITE_ENSURE(context, NumInputs(node) == 1 || NumInputs(node) == 2);
-  TF_LITE_ENSURE_EQ(context, NumOutputs(node), 1);
+TfLiteStatus ResizeOutputTensor(TfLiteContext* context,
+                                TransposeContext* op_context) {
+  int dims = NumDimensions(op_context->input);
+  const int* perm_data = GetTensorData<int32_t>(op_context->perm);
 
-  TransposeContext op_context(context, node);
-  int dims = NumDimensions(op_context.input);
-
-  // Ensure validity of input tensor and permutation array.
-  TF_LITE_ENSURE_EQ(context, op_context.input->type, op_context.output->type);
-  TF_LITE_ENSURE_EQ(context, dims, op_context.params->num_dimensions);
-  TF_LITE_ENSURE_MSG(context, dims <= 4,
-                     "Transpose op only supports 1D-4D input arrays.");
+  // Ensure validity of the permutations tensor as a 1D tensor.
+  TF_LITE_ENSURE_EQ(context, NumDimensions(op_context->perm), 1);
+  TF_LITE_ENSURE_EQ(context, op_context->perm->dims->data[0], dims);
   for (int idx = 0; idx < dims; ++idx) {
-    TF_LITE_ENSURE_MSG(context,
-                       op_context.params->perm[idx] >= 0 &&
-                           op_context.params->perm[idx] < dims,
+    TF_LITE_ENSURE_MSG(context, (perm_data[idx] >= 0 && perm_data[idx] < dims),
                        "Transpose op permutations array is out of bounds.");
   }
 
   // Determine size of output tensor.
-  const TfLiteIntArray* input_size = op_context.input->dims;
-  TfLiteIntArray* output_size = TfLiteIntArrayCreate(dims);
+  TfLiteIntArray* input_size = op_context->input->dims;
+  TfLiteIntArray* output_size = TfLiteIntArrayCopy(input_size);
   for (int idx = 0; idx < dims; ++idx) {
-    output_size->data[idx] = input_size->data[op_context.params->perm[idx]];
+    output_size->data[idx] = input_size->data[perm_data[idx]];
   }
 
-  return context->ResizeTensor(context, op_context.output, output_size);
+  return context->ResizeTensor(context, op_context->output, output_size);
+}
+
+TfLiteStatus Prepare(TfLiteContext* context, TfLiteNode* node) {
+  TF_LITE_ENSURE_EQ(context, NumInputs(node), 2);
+  TF_LITE_ENSURE_EQ(context, NumOutputs(node), 1);
+
+  TransposeContext op_context(context, node);
+
+  // Ensure validity of input tensor.
+  TF_LITE_ENSURE_MSG(context, NumDimensions(op_context.input) <= 4,
+                     "Transpose op only supports 1D-4D input arrays.");
+  TF_LITE_ENSURE_EQ(context, op_context.input->type, op_context.output->type);
+
+  if (!IsConstantTensor(op_context.perm)) {
+    SetTensorToDynamic(op_context.output);
+    return kTfLiteOk;
+  }
+  return ResizeOutputTensor(context, &op_context);
 }
 
 template <KernelType kernel_type>
 TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
   TransposeContext op_context(context, node);
 
-  // Reverse the permuted axes and convert to 4D due to the way Dims are
-  // constructed in GetTensorDims.
-  const int kOutputDimensionNum = 4;
-  int reversed_perm[kOutputDimensionNum];
-  int size = op_context.params->num_dimensions;
-  for (int output_k = 0, input_k = size - 1; output_k < size;
-       ++output_k, --input_k) {
-    reversed_perm[output_k] = size - op_context.params->perm[input_k] - 1;
+  // Resize the output tensor if the output tensor is dynamic.
+  if (IsDynamicTensor(op_context.output)) {
+    TF_LITE_ENSURE_OK(context, ResizeOutputTensor(context, &op_context));
   }
-  for (int k = size; k < kOutputDimensionNum; ++k) {
-    reversed_perm[k] = k;
+
+  const int* perm_data = GetTensorData<int32_t>(op_context.perm);
+  const int size = op_context.perm->dims->data[0];
+  TransposeParams params;
+  params.perm_count = size;
+  for (int i = 0; i < size; ++i) {
+    params.perm[i] = perm_data[i];
   }
 
 #define TF_LITE_TRANSPOSE(type, scalar)                     \
-  type::Transpose(GetTensorData<scalar>(op_context.input),  \
-                  GetTensorDims(op_context.input),          \
-                  GetTensorData<scalar>(op_context.output), \
-                  GetTensorDims(op_context.output), reversed_perm)
+  type::Transpose(params, GetTensorShape(op_context.input), \
+                  GetTensorData<scalar>(op_context.input),  \
+                  GetTensorShape(op_context.output),        \
+                  GetTensorData<scalar>(op_context.output))
 
   switch (op_context.input->type) {
     case kTfLiteFloat32:
@@ -119,7 +129,8 @@ TfLiteStatus Eval(TfLiteContext* context, TfLiteNode* node) {
       break;
     default:
       context->ReportError(context,
-                           "Type is currently not supported by Transpose.");
+                           "Type %d is currently not supported by Transpose.",
+                           op_context.input->type);
       return kTfLiteError;
   }
 #undef TF_LITE_TRANSPOSE
