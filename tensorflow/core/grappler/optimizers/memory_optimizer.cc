@@ -1083,6 +1083,10 @@ struct CmpByValueReverse {
   }
 };
 
+int randint(int Min, int Max) {
+    return std::rand() % (Max + 1 - Min) + Min;
+}
+
 // Danny Experiment
 // f1 ------> f2, from f2 back to find a trigger-in node in the path to f1
 static NodeDef* GetDirectOrderStragety(GraphView& view, 
@@ -1120,51 +1124,56 @@ static NodeDef* GetDirectOrderStragety(GraphView& view,
   //}
   int grad_count = 0;
   for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
+    //VLOG(1) << "......[DEBUG2] ... topo_order_vec's item:" << (*it_i).first->name()
+    //<< ", oder:" << (*it_i).second;
     if((*it_i).first->name().find("gradients")!= std::string::npos)
       grad_count++;
   }
   // Danny experiment:
-  VLOG(1) << "......[DEBUG2] ...get grad_count=:" << grad_count << ", topo_order_vec size=" << topo_order_vec.size();
-  //Start from trigger_in_count
-  int trigger_in_count = (int)(std::sqrt(1.0/grad_count) * 50);
-  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
-    int index = distance(topo_order_vec.begin(), it_i);
-    if((index >= trigger_in_count) && ((*it_i).first->name().find("gradients") != std::string::npos)) {
-      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name()
-      << ", order:" << (*it_i).second << ", trigger_in_count:" << trigger_in_count;
-      return (*it_i).first;
+  VLOG(1) << "......[DEBUG2] ...get grad_count=" << grad_count << ", topo_order_vec size=" << topo_order_vec.size();
+  std::vector<NodeDef*> result_list;
+  if(grad_count > 1) {
+    // normal cases
+    // Compute a topological ordering for the node fanin.
+    for (const string& input_name : f2->input()) {
+      if((input_name.find("Shape") != std::string::npos) || 
+          (input_name.find("swap") != std::string::npos))
+        continue;
+      if(input_name != f1->name()) {
+        VLOG(1) << "......[DEBUG2] ...get f2 input_name=" << input_name;
+        const NodeDef* f2_input_node = node_map.GetNode(input_name);
+        
+        std::unordered_map<NodeDef*, int> topo_order_normal_case;
+        // we use pre-order: f2 -> 0, 1, 2, 3, ... -> f1
+        ReverseBfs(view, {const_cast<NodeDef*>(f2_input_node)},
+            [&topo_order_normal_case](NodeDef* n) {
+            int topo_index = topo_order_normal_case.size();
+            topo_order_normal_case[n] = topo_index;
+          }, 
+          nullptr,
+          nullptr);
+        //Start from 1 (gradient op)
+        // convert map to vector<PAIR>
+        std::vector<PAIR> topo_order_vec1(topo_order_normal_case.begin(), topo_order_normal_case.end());
+        // sort by value
+        sort(topo_order_vec1.begin(), topo_order_vec1.end(), CmpByValue());
+        int rand_index = randint(3, 6);
+        for(std::vector<PAIR>::iterator it_i=topo_order_vec1.begin(); it_i!=topo_order_vec1.end(); ++it_i) {
+          int index = distance(topo_order_vec1.begin(), it_i);
+          if(index >= rand_index && ((*it_i).first->name().find("gradients")!= std::string::npos) &&
+            ((*it_i).first->name().find("Shape") == std::string::npos) &&
+            (input_name.find("swap") == std::string::npos)) {
+            VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
+            << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
+            // add to result_list for random pick later
+            result_list.push_back((*it_i).first);
+          }
+        }
+      }
     }
-  }
-  //Start from 10 (gradient op)
-  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
-    int index = distance(topo_order_vec.begin(), it_i);
-    if(index >= 10 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
-      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
-      << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
-      return (*it_i).first;
-    }
-  }
-  //Start from 5 (gradient op)
-  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
-    int index = distance(topo_order_vec.begin(), it_i);
-    if(index >= 5 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
-      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
-      << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
-      return (*it_i).first;
-    }
-  }
-  //Start from 2 (gradient op)
-  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
-    int index = distance(topo_order_vec.begin(), it_i);
-    if(index >= 2 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
-      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
-      << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
-      return (*it_i).first;
-    }
-  }
-  // special case, grad_count=1, like ShapeN, Shape, Shape1...
-  //trigger_in_count = (int)(std::sqrt(1.0/topo_order_vec.size()) * 80);
-  if(grad_count <= 1) {
+  } else {
+    // special case, grad_count=1, like ShapeN, Shape, Shape1...
+    //trigger_in_count = (int)(std::sqrt(1.0/topo_order_vec.size()) * 80);
     // check if f2 has not gradient op as input
     bool has_grad_input = false;
     for (const string& input_name : f2->input()) {
@@ -1173,7 +1182,6 @@ static NodeDef* GetDirectOrderStragety(GraphView& view,
         break;
       }
     }
-    std::vector<const NodeDef*> _candidates;
     if(!has_grad_input){
       for (const NodeDef* f2_output_node : node_map.GetOutputs(f2->name())) {
         if(f2_output_node->name().find("Shape") != std::string::npos)
@@ -1184,11 +1192,11 @@ static NodeDef* GetDirectOrderStragety(GraphView& view,
             const NodeDef* other_input_node = node_map.GetNode(input_name);
             std::unordered_map<NodeDef*, int> topo_order_special_case;
             // we use pre-order: f2 -> 0, 1, 2, 3, ... -> f1
-            ReverseDfs(view, {const_cast<NodeDef*>(other_input_node)},
+            ReverseBfs(view, {const_cast<NodeDef*>(other_input_node)},
                 [&topo_order_special_case](NodeDef* n) {
                 int topo_index = topo_order_special_case.size();
                 topo_order_special_case[n] = topo_index;
-              }, 
+              },
               nullptr,
               nullptr);
             //Start from 1 (gradient op)
@@ -1196,12 +1204,15 @@ static NodeDef* GetDirectOrderStragety(GraphView& view,
             std::vector<PAIR> topo_order_vec2(topo_order_special_case.begin(), topo_order_special_case.end());
             // sort by value
             sort(topo_order_vec2.begin(), topo_order_vec2.end(), CmpByValue());
+            int rand_index = randint(1, 3);
             for(std::vector<PAIR>::iterator it_i=topo_order_vec2.begin(); it_i!=topo_order_vec2.end(); ++it_i) {
                 int index = distance(topo_order_vec2.begin(), it_i);
-              if(index >= 1 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
+              if(index >= rand_index && ((*it_i).first->name().find("gradients")!= std::string::npos) && 
+                  ((*it_i).first->name().find("Shape") == std::string::npos) &&
+                  (input_name.find("swap") == std::string::npos)) {
                 VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
                 << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
-                return (*it_i).first;
+                result_list.push_back((*it_i).first);
               }
             }
           }
@@ -1209,8 +1220,13 @@ static NodeDef* GetDirectOrderStragety(GraphView& view,
       }
     }
   }
-  VLOG(1) << "......[DEBUG2] ...in_trigger is NULL";
-  return nullptr;
+  int ret_max = result_list.size()
+  if(ret_max <= 0) {
+    VLOG(1) << "......[DEBUG2] ...in_trigger is NULL";
+    return nullptr;
+  } else {
+    return result_list[randint(0, ret_max-1)];
+  }
 }
 
 // Danny Experiment
