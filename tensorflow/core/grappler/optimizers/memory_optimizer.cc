@@ -718,7 +718,9 @@ bool SchedulingPass(Cluster* cluster, GrapplerItem* item) {
 Status BuildSwapPair(NodeDef* node, int input_to_swap,
                      const std::unordered_map<string, const NodeDef*>& name_map,
                      GraphDef* graph,
-                     std::pair<NodeDef*, NodeDef*>* swap_pair) {
+                     std::pair<NodeDef*, NodeDef*>* swap_pair,
+                     std::unordered_map<string, NodeDef*>* fuse_swapout_list,
+                     bool* has_fused) {
   const OpDef* op_def;
   TF_RETURN_IF_ERROR(OpRegistry::Global()->LookUpOpDef(node->op(), &op_def));
   DataType input_type;
@@ -738,11 +740,30 @@ Status BuildSwapPair(NodeDef* node, int input_to_swap,
     return errors::InvalidArgument("Input ", input_to_swap, " of node ",
                                    node->name(), " is already swapped");
   }
-
-  // Force the tensor to be copied to cpu.
-  NodeDef* swap_out_node = graph->add_node();
-  swap_out_node->set_name(swap_out_name);
-  swap_out_node->set_op("_CopyFromGpuToHost");
+  VLOG(1) << "...[DEBUG2] BuildSwapPair(), node:" << node->name()
+    << "input_id:" << input_to_swap;
+  // Find the f1 node name
+  string fuse_key = node->input(input_to_swap);
+  // Find the fuse node if existed
+  auto ifuse_found = fuse_swapout_list->find(fuse_key);
+  NodeDef* swap_out_node;
+  if(ifuse_found != fuse_swapout_list->end()){
+    // Reuse the fuse node
+    swap_out_node = ifuse_found->second;
+    *has_fused = true;
+    VLOG(1) << "...[DEBUG2] BuildSwapPair(), fuse_key:" << fuse_key 
+      << "use fused swap_out_node:" << swap_out_node->name();
+  } else {
+    // Create new
+    // Force the tensor to be copied to cpu.
+    swap_out_node = graph->add_node();
+    swap_out_node->set_name(swap_out_name);
+    swap_out_node->set_op("_CopyFromGpuToHost");
+    (*fuse_swapout_list)[fuse_key] = swap_out_node;
+    *has_fused = false;
+    VLOG(1) << "...[DEBUG2] BuildSwapPair(), fuse_key not found, " 
+      << "create new swap_out_node:" << swap_out_node->name();
+  }
 
   // Force the tensor to be restored to the device.
   NodeDef* swap_in_node = graph->add_node();
@@ -751,15 +772,18 @@ Status BuildSwapPair(NodeDef* node, int input_to_swap,
   *swap_in_node->add_input() = swap_out_node->name();
 
   // Colocate the swap_out_ and swap_in_ nodes with the node itself.
-  swap_out_node->set_device(node->device());
+  if(! *has_fused)
+    swap_out_node->set_device(node->device());
   swap_in_node->set_device(node->device());
   string coloc_group = strings::StrCat("loc@", tensor_to_swap);
-  (*swap_out_node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
+  if(! *has_fused)
+    (*swap_out_node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
   (*swap_in_node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
   (*node->mutable_attr())["_class"].mutable_list()->add_s(coloc_group);
 
   (*swap_in_node->mutable_attr())["T"].set_type(input_type);
-  (*swap_out_node->mutable_attr())["T"].set_type(input_type);
+  if(! *has_fused)
+    (*swap_out_node->mutable_attr())["T"].set_type(input_type);
   *swap_pair = std::make_pair(swap_out_node, swap_in_node);
 
   return Status::OK();
@@ -1135,28 +1159,10 @@ static NodeDef* GetDirectOrderStragety(GraphView& view,
       return (*it_i).first;
     }
   }
-  //Start from 10 (gradient op)
+  //Start from 3 (gradient op)
   for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
     int index = distance(topo_order_vec.begin(), it_i);
-    if(index >= 10 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
-      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
-      << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
-      return (*it_i).first;
-    }
-  }
-  //Start from 5 (gradient op)
-  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
-    int index = distance(topo_order_vec.begin(), it_i);
-    if(index >= 5 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
-      VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
-      << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
-      return (*it_i).first;
-    }
-  }
-  //Start from 2 (gradient op)
-  for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
-    int index = distance(topo_order_vec.begin(), it_i);
-    if(index >= 2 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
+    if(index >= 3 && ((*it_i).first->name().find("gradients")!= std::string::npos)) {
       VLOG(1) << "......[DEBUG2] ...get in-trigger name:" << (*it_i).first->name() 
       << ", order:" << (*it_i).second << ", trigger_in_count:" << index;
       return (*it_i).first;
@@ -1248,7 +1254,7 @@ static NodeDef* GetChainRuleStrategy(GraphView& view,
   //  << ", is founded:" << (result == name_map.end() ? "No":"Yes");
   //}
   // If it starts from 1, the next op will wait for CopyFromGPUtoHost finished...
-  int trigger_in_count = topo_order_vec.size() * 0.1;
+  int trigger_in_count = topo_order_vec.size() * 0.05;
   for(std::vector<PAIR>::iterator it_i=topo_order_vec.begin(); it_i!=topo_order_vec.end(); ++it_i) {
     int index = distance(topo_order_vec.begin(), it_i);
     if((index >= trigger_in_count) && ((*it_i).first->name().find("gradients") == std::string::npos)){
@@ -1501,6 +1507,7 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
                   Cluster* cluster, GrapplerItem* item,
                   std::unordered_set<string>* skip_list) {
   std::unordered_map<NodeDef*, SwapInfo> nodes_to_swap;
+  std::unordered_map<string, NodeDef*> fuse_swapout_list;
   if (optimization_level == RewriterConfig::DEFAULT_MEM_OPT ||
       optimization_level == RewriterConfig::SWAPPING_HEURISTICS ||
       optimization_level == RewriterConfig::HEURISTICS) {
@@ -1625,12 +1632,16 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
       //}
 
       std::pair<NodeDef*, NodeDef*> swap_nodes;
-      if (!BuildSwapPair(node, input_id, name_map, &item->graph, &swap_nodes)
-               .ok()) {
+      bool has_fused = false;
+      if (!BuildSwapPair(node, input_id, name_map, &item->graph, &swap_nodes, 
+          &fuse_swapout_list, &has_fused).ok()) {
         VLOG(1) << "...[DEBUG] ...in SwappingPass(), ...build swap pair is failed...";
         continue;
       }
-      *swap_nodes.first->add_input() = node->input(input_id);
+      // if it has fused, don't need to connect again
+      if(!has_fused) {
+        *swap_nodes.first->add_input() = node->input(input_id);
+      }
       *node->mutable_input(input_id) = swap_nodes.second->name();
 
       // Add the control dependencies needed to delay the execution of the swap.
